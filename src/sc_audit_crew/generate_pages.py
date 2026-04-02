@@ -625,7 +625,11 @@ _OUTPUT_DIR_RE = re.compile(r"^(.+)_(\d{4}-\d{2}-\d{2})$")
 
 
 def _extract_json_block(text: str) -> str:
-    """Strip leading/trailing ```json fences if present."""
+    """Extract JSON from text, handling optional ```json fences and scratchpad prefix."""
+    match = re.search(r"```(?:json)?\s*\n?([\s\S]*?)\n?```", text)
+    if match:
+        return match.group(1).strip()
+    # Fall back: strip only leading/trailing fences (backward compat)
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*\n?", "", text)
     text = re.sub(r"\n?```\s*$", "", text)

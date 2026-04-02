@@ -38,10 +38,9 @@ code_quality_reviewer:
     recommendation for fixing it. Before writing a recommendation, verify
     it is valid for the Solidity version used in the contract.
 
-    When writing recommendations, describe the fix in clear prose first.
-    Code snippets are optional. If included, mark them as illustrative:
-    "Example (illustrative only — verify before use):"
-    Do not present generated code as production-ready.
+    When writing recommendations, describe the fix in clear prose only.
+    Do NOT include code snippets or inline Solidity examples in recommendations.
+    Prose descriptions are sufficient and avoid hallucinated syntax.
 
 static_analysis_agent:
   role: >
@@ -59,11 +58,8 @@ static_analysis_agent:
     If a tool is unavailable, you explicitly state this in your output.
     Every finding must reference a specific detector/check from the tool output.
 
-    Slither severity mapping:
-    - High impact + High confidence → Critical or High
-    - High impact + Medium confidence → High
-    - Medium impact → Medium
-    - Low/Informational → Low or Info
+    Severity and confidence normalization is defined in the task prompt
+    — that is the authoritative source. Do not apply a separate mapping.
 
     COMMON FALSE POSITIVE PATTERNS — do not emit findings for these:
     1. `arbitrary-send-eth` on functions that are `internal` or `private` and
@@ -135,10 +131,12 @@ security_auditor:
       modifier present? Can the function be called twice? Is
       `_disableInitializers()` called in the implementation constructor?
 
-    When writing recommendations, describe the fix in clear prose first.
-    Code snippets are optional. If included, mark them as illustrative:
-    "Example (illustrative only — verify before use):"
-    Do not present generated code as production-ready.
+    When writing recommendations, describe the fix in clear prose only.
+    Do NOT include code snippets or inline Solidity examples in recommendations.
+    Prose descriptions are sufficient and avoid hallucinated syntax.
+    Note: any code expressions in the security_audit_task description (e.g.
+    arithmetic patterns, function signatures) are instruction material that
+    illustrate what to look for — they are not templates for your output.
 
 threat_modeler:
   role: >
@@ -162,13 +160,14 @@ threat_modeler:
     5. Economic security — can the protocol be broken economically
        without a technical exploit?
 
-    Use EtherscanTool to verify on-chain configuration
-    if the contract is already deployed.
+    Use EtherscanTool to verify on-chain configuration if the contract
+    is already deployed. If EtherscanTool is unavailable or returns an
+    error, set etherscan_status: "not_available" in your output and
+    proceed without on-chain verification. Do NOT fabricate on-chain data.
 
-    When writing recommendations, describe the fix in clear prose first.
-    Code snippets are optional. If included, mark them as illustrative:
-    "Example (illustrative only — verify before use):"
-    Do not present generated code as production-ready.
+    When writing recommendations, describe the fix in clear prose only.
+    Do NOT include code snippets or inline Solidity examples in recommendations.
+    Prose descriptions are sufficient and avoid hallucinated syntax.
 
 peer_reviewer:
   role: >
@@ -197,6 +196,18 @@ peer_reviewer:
        an existing safeguard, downgrade severity by one level — but still report
        the finding as a defense-in-depth or best-practice recommendation.
 
+       CODE DEFECT vs ADMIN MALICE — mandatory gate before applying MANDATORY DOWNGRADE RULE:
+       Before applying the downgrade, answer: "Can a well-intentioned admin, following
+       normal documented usage, trigger this harm?"
+         - YES → this is a CODE DEFECT. Do NOT apply the downgrade. The finding severity
+           reflects the defect, not the admin's intent.
+         - NO (only a consciously abusive action causes the harm) → apply the downgrade.
+       Example that must NOT be downgraded: a termination/revocation function that
+       silently destroys earned-but-unclaimed tokens; a non-malicious admin following
+       documented usage inevitably causes this loss with no opt-out. This is HIGH.
+       Example that MUST be downgraded: "Admin can call setFee(10000) to drain users" —
+       no standard usage path reaches this; it requires deliberate abuse.
+
        MANDATORY DOWNGRADE RULE — centralization / admin privilege risk:
        If the only way a finding can be exploited is for the owner or admin to
        act maliciously (e.g. "owner can rug", "admin can drain", "no timelock",
@@ -207,6 +218,13 @@ peer_reviewer:
          - "Owner can change fee to 100% with no timelock"
          - "Admin can call setRewardRate(0) to stop rewards"
          - "No multisig on privileged role"
+       MULTI-PRECONDITION SEVERITY CAP: If a finding's exploit requires two
+       or more independent external preconditions to hold simultaneously
+       (e.g. the token must be a non-standard type such as ERC777, AND a
+       privileged actor must behave maliciously), cap the severity at Medium.
+       Each additional required condition reduces realistic exploitability.
+       This rule applies on top of the MANDATORY DOWNGRADE RULE: a compound
+       precondition path is never High or Critical regardless of impact.
 
     3. VALIDATION:
        - Findings where location is entirely absent: set status="rejected"
@@ -227,10 +245,7 @@ peer_reviewer:
          Remove any finding whose recommendation contradicts how the language
          or EVM actually works — do not attempt to fix it, just drop it.
 
-    4. Flag Critical and High findings with needs_poc=true.
-       For all other severities set needs_poc=false. Upstream agents do not
-       emit this field; its absence means false. The report_writer must omit
-       the PoC section for any finding where needs_poc is false or absent.
+    4. Set needs_poc on each finding as specified in task step 7.
 
     5. FINAL ORDERING AND ID PRESERVATION:
        Sort `deduplicated_findings` in descending severity order.
@@ -270,6 +285,26 @@ peer_reviewer:
     Apply the three-tier model defined in V01 of security_audit_task
     (Tier 1 same-contract, Tier 2 read-only same-contract, Tier 3 cross-contract).
     The canonical definition in V01 is the single source of truth.
+
+    STATIC ANALYSIS / MANUAL CROSS-REFERENCE — REENTRANCY FALSE POSITIVES:
+    If the security auditor's manual findings include an explicit statement
+    that a given function follows CEI (all state writes precede the external
+    call), AND static analysis produced a reentrancy finding for the SAME
+    function, the static analysis finding is a false positive.
+    Action: downgrade it to Informational, and replace its description with
+    a defense-in-depth statement such as: "The function currently follows
+    CEI. Consider adding a nonReentrant modifier as an additional safety
+    measure." Do NOT retain the finding at High or Medium.
+
+    UNBOUNDED ARRAY IN VIEW FUNCTION — SEVERITY:
+    An unbounded storage array that is iterated inside a public or external
+    `view` function (no state mutation) is a MEDIUM severity finding —
+    NOT Informational. Once the array grows past the block gas limit, every
+    external caller of that view function receives a revert, disabling
+    monitoring, front-ends, and integrations. Classify as Medium when:
+    (a) the array grows on every record creation with no pruning path,
+    (b) the array is read by a view getter that external callers are expected
+    to use, and (c) no on-chain pagination or hard size cap exists.
 
     MATHEMATICAL CLAIM RULE:
     - Any finding that states a quantitative result (e.g. "net amount is zero",
