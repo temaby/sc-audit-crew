@@ -1,0 +1,785 @@
+# =============================================================================
+# INPUT VARIABLE REFERENCE
+# =============================================================================
+# {contracts_full_source}   — Full Solidity source of every audited file,
+#                             concatenated with file-path headers.
+#                             Used by: code_quality_review_task,
+#                                      security_audit_task
+#
+# {contracts_skeleton}      — Stripped source: only function signatures,
+#                             state variable declarations, events, modifiers,
+#                             and NatSpec. Function bodies omitted.
+#                             Used by: threat_modeling_task
+#                             NOTE: do NOT pass full source here — it inflates
+#                             context for architectural analysis unnecessarily.
+#
+# {slither_target}          — Path passed to the Slither CLI (may be a single
+#                             .sol file or a Hardhat/Foundry project directory).
+#                             Used by: static_analysis_task
+#
+# {project_root}            — Root directory of the contract project (used by
+#                             Slither to resolve remappings and imports).
+#                             Used by: static_analysis_task
+#
+# {contract_names}          — Comma-separated list of primary contract names
+#                             (without .sol extension) for Slither output
+#                             filtering.
+#                             Used by: static_analysis_task
+#
+# {specification}           — Free-text protocol specification or README.
+#                             Used by: security_audit_task, threat_modeling_task
+#
+# {documentation}           — Additional docs (e.g. whitepaper excerpts).
+#                             Used by: security_audit_task, threat_modeling_task
+#
+# {known_risks}             — Risks explicitly acknowledged by the team.
+#                             Used by: security_audit_task
+#
+# {test_code}               — Test files (TypeScript/Solidity). Optional.
+#                             Used by: code_quality_review_task,
+#                                      security_audit_task
+#
+# {protocol_type}           — e.g. "vesting", "AMM", "lending", "bridge".
+#                             Used by: code_quality_review_task,
+#                                      security_audit_task
+#
+# {chain}                   — e.g. "Ethereum", "Arbitrum", "Optimism".
+#                             Used by: code_quality_review_task,
+#                                      security_audit_task,
+#                                      threat_modeling_task
+#
+# {project_name}            — Human-readable project name for the report.
+#                             Used by: report_writing_task
+#
+# {audit_date}              — ISO date string (YYYY-MM-DD).
+#                             Used by: report_writing_task
+#
+# {audit_scope}             — List of audited files with line counts.
+#                             Used by: report_writing_task
+#                             REQUIRED FORMAT (one entry per line):
+#                               contracts/Vault.sol (312 lines)
+#                               contracts/interfaces/IVault.sol (48 lines)
+#                             The report_writer extracts the number inside
+#                             "(N lines)" verbatim — any other format will
+#                             cause incorrect line counts in the Scope table.
+#
+# {deployed_address}        — On-chain address if already deployed.
+#                             Optional. Used by: threat_modeling_task
+# =============================================================================
+
+code_quality_review_task:
+  description: >
+    Perform a code quality review of the following smart contracts:
+
+    {contracts_full_source}
+
+    Check for:
+    1. Checks-Effects-Interactions pattern in every function with external calls.
+       MANDATORY VERIFICATION PROCEDURE for CEI findings:
+         a. Identify the external call (ERC20 transfer, safeTransfer, call{}, etc.).
+            If NO external call exists in the function, a CEI finding is IMPOSSIBLE
+            — do not emit one. Skip to the next check.
+         b. Confirm that at least one state variable that guards re-entry
+            (e.g. a balance, a flag, an active record) is written AFTER
+            the external call. If every state update precedes the external
+            call, CEI is followed — do not emit a finding.
+         c. Only if step (b) finds a state write that comes after the external
+            call AND that write affects a re-entrancy guard → emit a finding.
+         Note: emitting an event after an external call is NOT a CEI violation.
+               Events do not gate re-entry and should not be flagged as CEI issues.
+    2. Pull-over-Push for ETH/token payments
+    3. NatSpec comments on all public and external functions.
+       MANDATORY VERIFICATION PROCEDURE — follow this for every function:
+         a. Scan upward from the function signature until you hit either:
+            - a "/**" opening tag (NatSpec block) → function IS documented. STOP.
+            - a "///" line (single-line NatSpec) → function IS documented. STOP.
+            - a blank line or a closing "}" of another function → no documentation found.
+         b. Only if step (a) found no "/**" or "///" → create a missing_natspec finding.
+         NatSpec blocks can be any number of lines long. Do not limit your scan to N lines.
+       Valid NatSpec formats (any of these counts as full documentation):
+         - /** @notice ... */ multi-line block (may span multiple lines with leading *)
+         - /// @notice single-line tag
+         - /** ... */ block without tags still counts IF it contains a description
+       A line like " * @notice ..." inside a /** */ block IS a valid @notice tag.
+       NEVER flag a function that has /** or /// above it, regardless of which tags are present.
+    4. Meaningful names for variables, functions, and contracts
+    5. Function length (>50 lines is a red flag)
+    6. Magic numbers (hardcoded values without named constants)
+    7. Commented-out code and TODO comments
+    8. Storage layout correctness (especially for upgradeable contracts)
+    9. SafeMath / checked arithmetic usage
+    10. Visibility correctness (public vs external vs internal)
+
+    Protocol: {protocol_type}
+    Chain: {chain}
+
+    Test files (if provided — identify untested functions and missing edge cases):
+    {test_code}
+
+    OUTPUT RULES:
+    - CONSOLIDATION (mandatory): if the same issue type appears in N locations,
+      output EXACTLY ONE finding. List all affected functions/lines in the
+      description as a bullet list. This applies especially to: missing NatSpec,
+      magic numbers, visibility, naming conventions, missing events.
+      Never output N identical findings for the same issue type.
+    - Maximum 5 Informational findings total (consolidate aggressively).
+    - Before writing each finding, check: have I already written a finding with the
+      same title or same location? If yes — skip it.
+    - When you have no more distinct issues to report, STOP. Output the closing ] and finish.
+      Do NOT pad the output with repeated or fabricated findings to reach any target count.
+    - Maximum 40 findings total (including the 5 Informational cap above).
+
+  expected_output: >
+    A JSON array of Finding objects with fields:
+    id, source="code_quality", title, severity, category, location
+    (file + line), description, impact, recommendation.
+
+    Example:
+    [
+      {
+        "id": "QA-001",
+        "source": "code_quality",
+        "title": "Missing NatSpec on public function withdraw()",
+        "severity": "Informational",
+        "category": "missing_natspec",
+        "location": {"file": "Vault.sol", "line_start": 42, "function": "withdraw"},
+        "description": "...",
+        "impact": "...",
+        "recommendation": "..."
+      }
+    ]
+
+  agent: code_quality_reviewer
+
+static_analysis_task:
+  description: >
+    Run Slither on the project contracts.
+
+    Project root / target: {slither_target}
+    Project contract names: {contract_names}
+    Original source directory: {project_root}
+
+    Steps:
+    1. Run SlitherTool on {slither_target} with:
+       - contract_names={contract_names}
+       - original_file_dir={project_root}
+    2. Filter false positives:
+       - "calls-loop" in pure/view functions with no state change → Info, not Medium
+       - "divide-before-multiply" when intentional integer truncation is used
+    3. Normalize severity and map confidence to a 0.0–1.0 float:
+       Slither confidence → numeric: high=0.9, medium=0.6, low=0.3
+       High impact + High confidence → Critical or High
+       High impact + Medium confidence → High
+       Medium → Medium
+
+    IMPORTANT: If SlitherTool returns an error or is not installed, you MUST return ONLY:
+    {"tool_status": {"slither": "not_installed"}, "findings": []}
+    Do NOT simulate or guess tool output. An empty findings list is correct and expected.
+    Manual security review is handled separately by the security_auditor agent.
+
+  expected_output: >
+    JSON with two sections:
+    {
+      "tool_status": {
+        "slither": "success|error|not_installed"
+      },
+      "findings": [
+        {
+          "id": "SA-001",
+          "source": "static_analysis",
+          "title": "Divide-before-multiply in _baseVestedAmount",
+          "severity": "High",
+          "category": "integer_precision",
+          "location": {"file": "VTVLVesting.sol", "line_start": 147, "function": "_baseVestedAmount"},
+          "description": "...",
+          "impact": "...",
+          "recommendation": "...",
+          "detector": "divide-before-multiply",
+          "confidence": 0.8
+        }
+      ]
+    }
+    IDs use the SA- prefix. Every finding must include detector (the Slither
+    check name) and confidence (0.0-1.0 float).
+
+  agent: static_analysis_agent
+
+security_audit_task:
+  description: >
+    Perform a manual security review of the contracts.
+
+    {contracts_full_source}
+
+    Specification / documentation:
+    {specification}
+
+    Additional documentation:
+    {documentation}
+
+    Known risks disclosed by the team:
+    {known_risks}
+
+    Test files (use to identify what is NOT covered by tests):
+    {test_code}
+
+    Protocol: {protocol_type} on {chain}
+
+    COVERAGE REQUIREMENT — you MUST reason through ALL 19 vectors below and emit
+    exactly one entry per vector in the `coverage` array of your output.
+    status="not_applicable" is valid (explain why in one sentence).
+    Omitting a vector ID entirely is NOT allowed.
+
+    Security vectors (V01–V19):
+
+    V01 Reentrancy — apply this three-tier model for every external call:
+        TIER 1 Same-contract: re-entering the same or another mutating function
+          on this contract. Fully blocked by `nonReentrant` — do not flag if
+          the modifier is present.
+        TIER 2 Read-only (same contract): a view on THIS contract is called
+          externally while an outbound call is in flight; stale value has no
+          on-chain financial consequence → Low at most. `nonReentrant` does
+          NOT block this tier.
+        TIER 3 Cross-contract: a DIFFERENT in-scope contract reads this
+          contract's state (via view or storage) while its outbound call is
+          in flight AND uses that stale value for a financial decision (price,
+          collateral, liquidation). `nonReentrant` on THIS contract does NOT
+          block Tier 3. Verify: (a) another contract calls a view here,
+          (b) the result drives a financial decision, (c) the value can be
+          stale during the outbound call. All three YES → High or Critical.
+
+    V02 Access control — missing or incorrect modifiers; privilege escalation
+        paths; functions that should be restricted but are public/external.
+        Also: low-level call()/delegatecall()/staticcall() return values must
+        be checked; non-reverting ERC20s (e.g. USDT, BNB) silently return
+        false instead of reverting — unchecked return values silently swallow
+        failures.
+
+    V03 Oracle manipulation — price feed staleness, TWAP window manipulation,
+        single-block spot price usage, Chainlink latestRoundData() validation.
+
+    V04 MEV — sandwich attacks on swaps/deposits, frontrunning of admin ops,
+        backrunning of liquidations; identify functions where tx ordering affects
+        outcome.
+
+    V05 Flash loan composability — state that can be manipulated within a
+        single transaction using borrowed liquidity; check price-sensitive
+        computations.
+
+    V06 Proxy / delegatecall — storage slot collisions, uninitialized
+        implementation contracts, selfdestruct in implementation, msg.sender
+        context in delegatecall.
+
+    V07 Integer edge cases — overflow/underflow in unchecked blocks; division
+        before multiplication; precision loss in multi-step calculations.
+        CRITICAL PATTERN — intermediate type truncation:
+          In Solidity, arithmetic is performed in the type of the operands.
+          When two values of ANY sub-256-bit type (uint8, uint32, uint96,
+          uint112, uint128, etc.) are multiplied, the product is computed
+          at the operand type's precision, NOT promoted to uint256 — even
+          with Solidity ≥0.8 checked arithmetic.
+          If the product can exceed the type's max under realistic inputs,
+          the multiplication REVERTS, permanently bricking any function that
+          calls it (e.g., withdrawals, claims). This is HIGH severity.
+          The general rule: for every multiplication `a * b` in the code,
+          identify the declared types of a and b. If either is not already
+          uint256, check whether the product can overflow that type.
+          Fix: cast at least one operand to uint256 first:
+            `uint256(a) * b / c` instead of `a * b / c`.
+          Example of the pattern: `uint112 a; uint40 b; result = a * b / c;`
+          — the product is uint112, not uint256.
+
+    V08 DoS — unbounded loops over storage arrays, forced revert griefing
+        (push payments to contracts), block gas limit attacks.
+
+    V09 Signature replay — missing nonce, domain separator, chain ID in
+        EIP-712 / ECDSA flows; cross-contract or cross-chain replay.
+
+    V10 Business logic — fee calculation errors, rounding that always favours
+        one party, invariants that can be broken under normal usage.
+        MANDATORY CHECK for vesting / streaming / lockup contracts:
+          Identify every function whose purpose is to terminate, shorten, or
+          remove a user's ongoing entitlement — regardless of its name.
+          Look for verbs and concepts such as: revoke, cancel, terminate,
+          forfeit, slash, withdraw-for-admin, remove, close, wipe, zero-out,
+          early-exit, or any function that deletes or resets a user record.
+          For each such function, verify:
+            1. Are tokens that have ALREADY VESTED (or streamed, or accrued)
+               but NOT YET WITHDRAWN preserved for the user?
+            2. Does the function correctly separate "earned but unclaimed"
+               from "future entitlement"? Only future entitlement should be
+               removed.
+          Correct behavior: user retains access to their already-earned
+          portion even after termination.
+          HIGH-severity fund-loss bug: the function zeros or deletes the
+          entire entitlement record (e.g. the full claim struct) without
+          first crediting already-earned tokens, making them unrecoverable.
+          Trace each such function end-to-end. Do not rely on function names
+          alone — inspect the actual storage writes.
+
+    V11 Admin setter validation — zero-value inputs silently accepted;
+        cross-variable invariants broken by partial updates (e.g. minStake >
+        maxStake after one setter call); missing events on critical changes.
+
+        MANDATORY CROSS-INVARIANT ENUMERATION: for every setter pair that
+        controls related bounds, explicitly enumerate the pair and its invariant
+        by following this procedure:
+        1. Identify all state variables that form a logical pair or group
+           (e.g. a lower bound and an upper bound on the same quantity,
+           a set of fees/rates that must sum to ≤ 100%, a cooldown that
+           must be shorter than a lock period).
+        2. For each such pair, write down the invariant in plain English
+           (e.g. "lower bound must be ≤ upper bound").
+        3. Check whether each setter validates the invariant against the
+           CURRENT stored value of its counterpart before writing.
+        4. If any setter allows an update that can violate the invariant
+           without reverting, emit a High finding — an admin error can
+           permanently block user transactions with no recovery path.
+
+    V12 Forced state changes — identify any external actor who can push the
+        contract into a different state without the user's consent; trace the
+        full economic consequence for affected users.
+
+    V13 Asset accounting — every path where tokens enter or leave the contract
+        must update the corresponding internal ledger variable; verify
+        internal balance == actual token balance at all exit points.
+
+    V14 Non-standard ERC20 — fee-on-transfer tokens (use received amount, not
+        parameter); rebasing tokens; tokens that return false instead of
+        reverting; tokens with no return value.
+        MANDATORY CHECK for deposit/reserve accounting:
+          For every function that transfers tokens INTO the contract AND adds
+          the transfer amount to an internal accounting variable, verify:
+            1. Is the amount added to internal accounting the token parameter
+               value (i.e. what was requested) rather than the actually
+               received amount (balance_after - balance_before)?
+            2. With a fee-on-transfer token, actual received = amount - fee,
+               so internalBalance accumulates more than the contract holds.
+               Over time the last withdrawer fails (balance < internalBalance).
+          Pattern to detect:
+            `internalVar += amount; token.transferFrom(..., amount);`
+          Correct pattern:
+            `uint before = token.balanceOf(this); token.transferFrom(...,amount);
+             internalVar += token.balanceOf(this) - before;`
+          Emit Medium if this pattern is found and the contract documentation
+          does not explicitly restrict to non-fee-on-transfer tokens.
+
+    V15 Decimal scaling — locate every hardcoded magnitude constant (1eN,
+        10**N, PRECISION, DENOMINATOR) used to scale token amounts.
+        For each constant, apply this decision tree (NO external calls needed):
+          1. Does the contract call `token.decimals()` and derive the scale
+             dynamically from that return value?
+             YES → safe, no finding.
+          2. Does the contract have an explicit guard validating the token
+             matches the assumed precision (e.g. `require(token.decimals()==18)`
+             or an equivalent check in the constructor/initializer)?
+             YES → safe, no finding.
+          3. Neither 1 nor 2: the contract assumes a fixed decimal count with
+             no runtime protection.
+             → Determine severity:
+               a. If the token address is a hardcoded constant or well-known
+                  address visible in the source AND its decimals can be read
+                  from the same source file (e.g. `decimals() returns (8)`) →
+                  compare directly. Confirmed mismatch = Critical.
+               b. Otherwise (token injected via constructor/parameter, or
+                  decimals not visible in source) → emit Medium:
+                  "Contract hardcodes a 1eN scaling constant but accepts an
+                  arbitrary token without validating its decimal count.
+                  Any token with different decimals causes systematic
+                  mis-scaling of all amounts."
+        Also flag thresholds defined in raw units while the rest of the
+        contract uses scaled units (or vice versa).
+
+    V16 Timestamp dependence — block.timestamp used for lock expiry,
+        cooldowns, deadlines; assess impact of ±15 s miner manipulation;
+        verify < vs <= boundary operators.
+
+    V17 Initializer security — for upgradeable contracts: single-use
+        enforcement, _disableInitializers() on implementation, re-init
+        vectors after upgrade, constructor vs initializer confusion.
+
+    V18 State-lock DoS — boolean flags or status enums settable to a terminal
+        value (e.g. permanently paused, permanently locked) with no recovery
+        path, blocking withdrawals.
+
+    V19 Spec vs implementation — if specification is provided, cross-check
+        every documented invariant (fees, thresholds, accounting rules, role
+        permissions) against the code; flag divergences as logic findings.
+
+    Every finding MUST include an exact line number.
+    Distinguish confirmed vs potential vulnerabilities.
+    Aim for ≤30 findings. If you have more, prioritise by impact and consolidate
+    related issues — never omit a confirmed High or Critical to meet the limit.
+
+  expected_output: >
+    A JSON object with two keys: `coverage` and `findings`.
+
+    `coverage` is an array of exactly 19 entries — one per vector V01–V19:
+    {
+      "vector_id": "V01",
+      "vector": "reentrancy",
+      "status": "checked" | "flagged" | "not_applicable",
+      "summary": "One sentence: what was verified or why not applicable.",
+      "finding_ids": ["MAN-001"]   // IDs of findings for this vector; [] if none
+    }
+
+    `findings` is an array of Finding objects with source="manual_review".
+    confidence 0.0-1.0: 1.0 = 100% exploitable, 0.5 = requires further analysis.
+
+    Full output shape:
+    {
+      "coverage": [ /* 19 entries, V01 through V19 */ ],
+      "findings": [ /* Finding objects */ ]
+    }
+
+  agent: security_auditor
+
+threat_modeling_task:
+  description: >
+    Perform threat modeling at the architecture level.
+
+    {contracts_skeleton}
+    Specification: {specification}
+    Documentation: {documentation}
+    Chain: {chain}
+    Deployed address (if any): {deployed_address}
+
+    Analyze:
+    1. CENTRALIZATION: what privileged roles exist?
+       Are they controlled by multisig or EOA?
+       Is there a timelock on critical operations?
+
+    2. UPGRADEABILITY: which proxy pattern is used?
+       Is storage collision possible? Is there a storage layout test?
+       Who controls the upgrade?
+
+    3. EXTERNAL DEPENDENCIES: oracles, external protocols.
+       What happens if Chainlink goes stale? If a Uniswap pool is manipulated?
+
+    4. ECONOMIC SECURITY: can the protocol be broken economically?
+       Governance attacks, flash loan voting?
+
+    5. ON-CHAIN VERIFICATION: if deployed_address is provided — use
+       EtherscanTool to verify the on-chain configuration.
+       If EtherscanTool is unavailable or returns an error, set
+       etherscan_status: "not_available" in your output and proceed
+       without on-chain verification. Do NOT fabricate on-chain data.
+
+    6. L2 / CHAIN-SPECIFIC RISKS: if {chain} is Arbitrum, Optimism, Base,
+       zkSync, or another L2 —
+       - Sequencer downtime: does the protocol have a fallback if the L2
+         sequencer is offline? (Chainlink provides a sequencer uptime feed
+         for Arbitrum and Optimism.)
+       - L2 block.timestamp may differ from L1 finality; flag protocols
+         that rely on timestamp precision for auction deadlines or vesting
+         cliffs as an architecture-level concern (no line number required).
+       - block.number semantics (e.g. Arbitrum increments per transaction):
+         note as an architecture risk if the contract description or state
+         variable names suggest block-counted time windows. Identifying
+         the exact arithmetic requires function bodies, which are outside
+         the provided skeleton — flag any suspected usage and note that
+         V16 in the security audit covers the code-level verification.
+
+    Aim for ≤15 findings. If you have more, merge related architectural concerns
+    and prioritise by impact — never omit a confirmed High or Critical.
+
+  expected_output: >
+    A JSON array of Finding objects with source="threat_model".
+    Each finding must have: id, source, title, severity, category,
+    location, description, impact, recommendation.
+
+    Location format depends on finding type:
+    - Code-level finding (maps to a specific function or line):
+        {"file": "Contract.sol", "line_start": 42, "function": "withdraw"}
+    - Architecture-level finding (no specific line — centralization risk,
+      missing timelock, governance attack surface, external dependency):
+        {"file": "architecture", "line_start": 0, "function": ""}
+
+  agent: threat_modeler
+
+peer_review_task:
+  description: >
+    Consolidate and normalize findings from all agents.
+
+    You receive results from:
+    - Code Quality Review
+    - Static Analysis (Slither)
+    - Manual Security Audit (includes a `coverage` array for vectors V01–V19)
+    - Threat Modeling
+
+    Steps:
+    0. COVERAGE AUDIT (run first, before touching findings):
+       Extract the `coverage` array from the Manual Security Audit output.
+       The expected vector IDs are: V01 V02 V03 V04 V05 V06 V07 V08 V09 V10
+                                     V11 V12 V13 V14 V15 V16 V17 V18 V19
+       a. List which IDs are present in the coverage array.
+       b. List which IDs are missing (present in the expected set but absent from coverage).
+       c. Record missing IDs in stats.coverage_gaps.
+       d. For each missing vector, create one Informational finding.
+          Assign IDs with the prefix PR- (peer-reviewer-generated), numbered
+          sequentially: PR-001, PR-002, etc.
+          title="Security vector <VXX> not covered in audit", source="peer_review",
+          severity="Informational", category="coverage_gap",
+          location={file: "audit_process", line_start: 0},
+          description="Vector <VXX> (<label>) was not included in the security audit
+          coverage matrix. The auditor should verify this vector was deliberately
+          skipped as not applicable and document the rationale."
+
+    1. DEDUPLICATION:
+       PRIMARY PASS — SEMANTIC DEDUP (run first):
+         Scan all findings for pairs that share the same root cause AND the same
+         or overlapping location (file + line range), regardless of title.
+         Example: "Integer overflow at line 147" and "Unsafe multiplication of
+         uint112" at the same expression are the same defect. For every such pair:
+           i.  Merge into the higher-severity entry.
+           ii. Add a note: "(also reported as <other-ID>)" in the description.
+         After this pass, verify: no two remaining findings share both an
+         overlapping location range and the same root cause.
+       SECONDARY PASS — TITLE COLLAPSE:
+         Group remaining findings by title (case-insensitive). For every group
+         with count > 1: collapse into ONE finding. Concatenate all locations
+         into a single bullet list inside the description.
+         Example: 16 "Missing NatSpec" entries → 1 finding listing all 16
+         affected functions. Also applies to repeated code-quality patterns
+         (magic numbers, missing events, visibility) across N functions.
+         This is non-negotiable.
+       POST-MERGE INFORMATIONAL CHECK:
+         After all merging, no single issue *type* may appear more than once
+         as an Informational finding. Every remaining Informational entry must
+         have a distinct root cause and a specific line reference. If any type
+         still appears more than once, the merge is incomplete — re-examine
+         before continuing.
+
+    2. SEVERITY NORMALIZATION:
+       Critical: direct loss of funds, no preconditions
+       High: loss of funds under realistic conditions
+       Medium: logic bugs, no direct financial loss
+       Low: best practices, minor risks
+       Info: observations
+
+    3. VALIDATION:
+       - Findings where location is entirely absent: do NOT silently drop them
+         and do NOT attempt to return them to the upstream agent (no callback
+         path exists in the pipeline). Instead, set status="rejected" and
+         rejection_reason="missing_location" on the finding, and exclude it
+         from `deduplicated_findings`. It will appear only in the stats.
+       - EXCEPTION: findings with source="threat_model" and
+         location.file="architecture" and location.line_start=0 are valid
+         architecture-level findings. Do NOT reject them — they represent
+         system-level risks (centralization, timelock, governance) that have
+         no specific line number. Accept them as-is.
+       - Findings with source="manual_review" and confidence < 0.3 — lower
+         severity by one level. The confidence field is only emitted by the
+         security_auditor agent. For findings from other sources (code_quality,
+         static_analysis, threat_model) where confidence is absent, treat the
+         field as absent — do NOT downgrade based on a missing field.
+         NOTE: SA findings do carry a confidence value (mapped from Slither:
+         high=0.9, medium=0.6, low=0.3), but this reflects detector trigger
+         reliability, not exploitability certainty. Do NOT apply severity
+         downgrading to SA findings based on their confidence value — it is
+         informational only and must not drive severity changes.
+
+    4. CRITICAL SEVERITY GATE:
+       Before emitting any finding with severity=Critical, answer all three:
+       a. Direct fund-loss path exists (concrete, not hypothetical)?
+       b. No special preconditions (e.g., not "only if owner is malicious")?
+       c. Exploit flow can be described in one sentence?
+       If any answer is NO → downgrade to High or Medium.
+       Findings about naming, constants, or documentation are NEVER Critical.
+
+       MANDATORY DOWNGRADE RULE — Centralization / admin privilege risk:
+       If the only way a finding can be exploited is for the owner/admin to
+       act maliciously (e.g. "owner can rug", "admin can drain", "no timelock"),
+       the maximum severity is MEDIUM. Rationale: condition (b) above is NO
+       because "malicious insider" is a precondition, not a zero-trust exploit.
+       Examples that MUST be Medium (not High or Critical):
+         - "Owner can change fee to 100% with no timelock"
+         - "Admin can call setRewardRate(0) to stop rewards"
+         - "Centralization risk: contract owner has unlimited privileges"
+         - "No multisig on privileged role"
+
+    5. MATHEMATICAL VERIFICATION:
+       For findings with quantitative claims, verify the arithmetic explicitly.
+       Example: if fee constants sum to 1000 and divisor is 10000,
+       total fee = 10%, net = 90% — a finding claiming "net is zero" must be
+       removed. Include the inline calculation in the finding description.
+
+       ACCOUNTING INVARIANT GATE — before emitting a finding that "variable X
+       is not decremented / updated after a token transfer":
+         NOTE: apply this gate using information contained in the finding's
+         own description and title (variable names, function names, described
+         behaviour). You do NOT have access to raw contract source — do NOT
+         attempt to infer pool identity from code you cannot see. If the
+         finding description does not provide enough context to determine
+         which pool the transfer draws from, pass the finding through as-is
+         and do not suppress it.
+         a. From the finding description, identify what asset pool X tracks.
+            Examples:
+              - `totalDeposited` → tracks all deposited user funds
+              - `totalBorrowed` → tracks outstanding loan principal
+              - `numTokensReservedForVesting` → tracks vesting liabilities
+              - `reserveBalance` → tracks protocol-owned liquidity reserves
+         b. From the finding description, identify what asset pool the
+            described transfer draws FROM. Ask: "After this transfer, which
+            pool is smaller — the one X tracks, or a different pool?"
+            Examples of different pools:
+              - Admin withdraws the contract's non-reserved surplus above X
+              - Protocol fee is taken from a separate fee accumulator, not user deposits
+              - Liquidation bonus is paid from the collateral pool, not reserves
+         c. Decision:
+              SAME pool (transfer reduces the pool X tracks) → X must be
+              decremented. If it isn't, emit an accounting discrepancy finding.
+              DIFFERENT pool (transfer draws from a pool X does not track) →
+              X not being decremented is CORRECT. Drop the finding.
+              INCONCLUSIVE (cannot determine from the description alone) →
+              pass the finding through unchanged.
+         Illustrative example (vesting): X = numTokensReservedForVesting
+         tracks vesting liabilities. withdrawAdmin() transfers only the surplus
+         (balance - X). The surplus pool is distinct from the liability pool,
+         so X correctly remains unchanged — do NOT flag this.
+         Illustrative example (AMM): X = reserve0 tracks token0 liquidity.
+         A swap transfers token0 OUT. reserve0 must be decremented — if it
+         isn't, the invariant k = reserve0 * reserve1 is stale → flag this.
+
+    6. UNUSED VARIABLE / DEAD CODE CLAIMS:
+       Before accepting any finding that states a state variable is "unused",
+       "never read", or "dead code", perform an explicit read-check:
+       - Search for every occurrence of the variable name across all functions.
+       - Classify each read site:
+           LOGICAL read: used in a conditional (`if`, `require`, `assert`),
+             arithmetic expression, return statement, or as an argument to
+             a non-event function call. A logical read means the variable
+             affects contract behavior — DROP the finding.
+           OBSERVATIONAL read: the variable appears only as an argument to
+             `emit SomeEvent(...)`. This does NOT affect control flow or state.
+             An event-only reference does NOT drop the finding.
+       - If the variable has at least one LOGICAL read site — drop the finding.
+       - If the only read sites are event `emit` arguments (or there are no
+         read sites at all), the finding is valid: emit it as Informational
+         with category="gas_optimization". Note the event location in the
+         description so developers can confirm the variable is observation-only.
+
+    7. Set needs_poc on each Finding object directly (boolean field on the finding).
+       Critical and High → needs_poc=true; all other severities → needs_poc=false.
+       Upstream agents do not emit this field; add it here during this step.
+       The report_writer reads needs_poc from each finding in deduplicated_findings
+       and omits the PoC section for any finding where needs_poc is false or absent.
+
+    8. FINAL ORDERING AND ID PRESERVATION:
+       Sort `deduplicated_findings` in descending severity order
+       (Critical → High → Medium → Low → Informational).
+       PRESERVE original source IDs exactly as assigned by each upstream
+       agent (e.g. QA-001, MAN-001, SA-001, TM-001).
+       Do NOT renumber findings to F-001, F-002, etc. The original IDs
+       are the canonical cross-reference identifiers used by the report writer.
+
+  expected_output: >
+    {
+      "deduplicated_findings": [ /* sorted Finding array */ ],
+      "stats": {
+        "total_before": N,
+        "duplicates_removed": N,
+        "rejected": N,
+        "by_severity": {"Critical": N, "High": N, "Medium": N, "Low": N, "Informational": N},
+        "coverage_gaps": []   /* list of missing vector IDs, e.g. ["V04", "V09"]; [] if complete */
+      },
+      /* needs_poc is a boolean field on each Finding in deduplicated_findings */
+    }
+
+    ID prefixes by source:
+      QA-xxx  → code_quality_reviewer
+      SA-xxx  → static_analysis_agent
+      MAN-xxx → security_auditor
+      TM-xxx  → threat_modeler
+      PR-xxx  → peer_reviewer (coverage-gap findings only)
+
+  agent: peer_reviewer
+  context:
+    - code_quality_review_task
+    - static_analysis_task
+    - security_audit_task
+    - threat_modeling_task
+
+report_writing_task:
+  description: >
+    Write the final audit report in two formats.
+
+    Project: {project_name}
+    Date: {audit_date}
+
+    Audited files:
+    {audit_scope}
+
+    Use findings from peer_review_task.
+
+    ID CONSISTENCY REQUIREMENT: When rendering the Findings Summary table and
+    the Detailed Findings section, use the canonical IDs provided by
+    `peer_review_task`'s `deduplicated_findings[].id` verbatim (e.g. "MAN-003",
+    "QA-001"). Do NOT invent local temporary IDs (e.g. "F-001") for the
+    same finding. If you need to produce secondary numbering for presentation
+    (e.g. sequential display numbers), include the canonical ID in the
+    heading: "[MAN-003] 1. Integer Overflow...". The canonical ID is the
+    single source of truth for cross-references in the report and JSON outputs.
+
+    ## Markdown report structure:
+
+    # Smart Contract Audit Report — {project_name}
+
+    ## Executive Summary
+    Write 3-5 sentences in non-technical language describing what the protocol
+    does and what the audit found.
+
+    Then output a deployment verdict on its own line using EXACTLY this format:
+
+    **Deployment Verdict: <VERDICT>** — <one-sentence rationale>
+
+    Verdict rules (apply the first that matches):
+    - **NOT RECOMMENDED FOR DEPLOYMENT** — one or more Critical findings present.
+    - **CONDITIONAL — FIXES REQUIRED** — no Criticals, but one or more High or
+      Medium findings present.
+    - **LOW RISK** — only Low and/or Informational findings present, or no
+      findings at all after deduplication.
+
+    After the verdict line, add this disclaimer verbatim:
+    > This verdict reflects automated multi-agent analysis only and does not
+    > substitute for a full manual audit by a qualified security firm.
+
+    ## Scope
+    A table listing the audited files. Use ONLY the data from "Audited files" above.
+    Columns: File | Lines | Notes
+    CRITICAL: The "Lines" value for each file MUST be copied EXACTLY and verbatim
+    from the "(N lines)" figure in the "Audited files" input above.
+    Do NOT recalculate, estimate, infer, or use any other source for line counts.
+    "Notes" = one short phrase describing the contract's purpose (e.g. "Main staking logic").
+    Do NOT put findings or JSON data in this table.
+
+    ## Methodology
+    (brief description: this audit was conducted by an AI-based multi-agent system (SCAuditCrew).
+    The pipeline includes automated static analysis via Slither, AI-driven manual code review,
+    threat modelling, and peer review for deduplication and severity normalisation.
+    Only mention tools that are part of this pipeline: Slither and the SCAuditCrew
+    AI multi-agent system. Do not mention other tools or human auditors.)
+
+    ## Findings Summary
+    | ID | Title | Severity |
+    (table of all findings — omit the `Status` column for now)
+
+    ## Detailed Findings
+    For each finding:
+    ### [MAN-001] 🔴 Critical — Title
+    **Location:** file:line
+    **Description:** ...
+    **Impact:** ...
+    *(Only for findings where needs_poc=true — insert a **Proof of Concept:** section
+    here with a minimal concrete exploit scenario or interaction sequence that
+    demonstrates the issue. Omit this section entirely when needs_poc=false.)*
+    **Recommendation:** ...
+
+    ## General Recommendations
+    (5-7 general security improvement recommendations)
+
+  expected_output: >
+    A complete Markdown audit report. Pure Markdown only — no JSON blocks.
+
+  agent: report_writer
+  context:
+    - peer_review_task

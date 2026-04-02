@@ -1,0 +1,85 @@
+name: Publish Audit Reports
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'output/**'
+  workflow_dispatch: # allow manual re-run (regenerates all reports)
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Generate HTML pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # need parent commit to diff against
+
+      - name: Detect changed audit directories
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual trigger: regenerate everything (leave DIRS empty)
+            echo "dirs=" >> $GITHUB_OUTPUT
+            echo "Triggered manually — regenerating all reports."
+          else
+            # Find output/ subdirs that changed in this push
+            DIRS=$(git diff --name-only HEAD~1 HEAD \
+              | grep '^output/' \
+              | sed 's|^output/\([^/]*\)/.*|\1|' \
+              | sort -u \
+              | tr '\n' ' ' \
+              | xargs)  # trim trailing space
+            echo "dirs=$DIRS" >> $GITHUB_OUTPUT
+            echo "Changed dirs: $DIRS"
+          fi
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install sc-audit-crew
+        run: pip install -e .
+
+      - name: Generate HTML reports
+        run: |
+          FILTER_ARGS=""
+          if [ -n "${{ steps.changed.outputs.dirs }}" ]; then
+            FILTER_ARGS="--filter-dirs ${{ steps.changed.outputs.dirs }}"
+          fi
+          python -m sc_audit_crew.generate_pages \
+            --output-dir output/ \
+            --pages-dir _site/ \
+            --github-repo ${{ github.repository }} \
+            $FILTER_ARGS
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

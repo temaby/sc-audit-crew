@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Package build / install artifacts
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# Project-specific directories
+output/
+docs/
+contracts/
+_site/
+
+# IDE
+.vscode/
+.idea/
+
+# OS, editor, test, and cache files
+.DS_Store
+Thumbs.db
+.pytest_cache/
+.mypy_cache/
+.cache/
+htmlcov/
+.tox/
+.coverage
+coverage.xml
+pip-wheel-metadata/
+
+# Logs
+*.log
+
+# Node / JS
+node_modules/
+
+# IPython/Jupyter
+.ipynb_checkpoints/
+
+# Database
+*.sqlite3
+*.db
+
+# Python version manager
+.python-version
+
+# dotenv variants
+.env.*
+
+# Secrets / credentials
+*.key
+*.pem
+*.p12
+secrets.yaml
+secrets.json
+api_keys.txt
