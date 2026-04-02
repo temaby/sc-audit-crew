@@ -107,7 +107,13 @@ code_quality_review_task:
     6. Magic numbers (hardcoded values without named constants)
     7. Commented-out code and TODO comments
     8. Storage layout correctness (especially for upgradeable contracts)
-    9. SafeMath / checked arithmetic usage
+    9. Checked arithmetic / SafeMath:
+       - Solidity ≥0.8: checked arithmetic is the default. Flag every
+         `unchecked {}` block that lacks a comment explaining why overflow
+         is impossible (Info/Low). Flag legacy SafeMath imports as
+         Informational (dead code — remove the import).
+       - Solidity <0.8: verify SafeMath is imported and applied to every
+         arithmetic expression involving user-controlled values.
     10. Visibility correctness (public vs external vs internal)
 
     Protocol: {protocol_type}
@@ -160,9 +166,10 @@ static_analysis_task:
     Original source directory: {project_root}
 
     Steps:
-    1. Run SlitherTool on {slither_target} with:
-       - contract_names={contract_names}
-       - original_file_dir={project_root}
+    1. Run SlitherTool to analyze {slither_target}.
+       Use {contract_names} to filter output to the target contracts and
+       {project_root} as the project root for import resolution.
+       (Pass these values using the tool's own documented parameter names.)
     2. Filter false positives:
        - "calls-loop" in pure/view functions with no state change → Info, not Medium
        - "divide-before-multiply" when intentional integer truncation is used
@@ -250,9 +257,10 @@ security_audit_task:
     V02 Access control — missing or incorrect modifiers; privilege escalation
         paths; functions that should be restricted but are public/external.
         Also: low-level call()/delegatecall()/staticcall() return values must
-        be checked; non-reverting ERC20s (e.g. USDT, BNB) silently return
-        false instead of reverting — unchecked return values silently swallow
-        failures.
+        be checked — an unchecked false return is a silent failure.
+        BOUNDARY: V02 covers only low-level call()/delegatecall()/staticcall()
+        return values. ERC20 token.transfer()/transferFrom() return value
+        checks (SafeERC20, silent-false tokens like USDT/BNB) belong to V14.
 
     V03 Oracle manipulation — price feed staleness, TWAP window manipulation,
         single-block spot price usage, Chainlink latestRoundData() validation.
@@ -287,6 +295,10 @@ security_audit_task:
             `uint256(a) * b / c` instead of `a * b / c`.
           Example of the pattern: `uint112 a; uint40 b; result = a * b / c;`
           — the product is uint112, not uint256.
+          Severity note: the default severity for this pattern is HIGH.
+          The peer reviewer may upgrade to Critical if the bricked function
+          is a primary withdrawal or claim path and the revert affects all
+          users unconditionally with no workaround path.
 
     V08 DoS — unbounded loops over storage arrays, forced revert griefing
         (push payments to contracts), block gas limit attacks.
@@ -296,7 +308,11 @@ security_audit_task:
 
     V10 Business logic — fee calculation errors, rounding that always favours
         one party, invariants that can be broken under normal usage.
-        MANDATORY CHECK for vesting / streaming / lockup contracts:
+        MANDATORY CHECK — apply ONLY if {protocol_type} contains "vesting",
+        "streaming", or "lockup". For all other protocol types, record
+        V10 coverage with status="not_applicable" ("Non-vesting protocol;
+        V10 business-logic base check passed; termination check N/A.").
+        When applicable, check for vesting / streaming / lockup contracts:
           Identify every function whose purpose is to terminate, shorten, or
           remove a user's ongoing entitlement — regardless of its name.
           Look for verbs and concepts such as: revoke, cancel, terminate,
@@ -345,7 +361,11 @@ security_audit_task:
 
     V14 Non-standard ERC20 — fee-on-transfer tokens (use received amount, not
         parameter); rebasing tokens; tokens that return false instead of
-        reverting; tokens with no return value.
+        reverting (USDT, BNB); tokens with no return value — use SafeERC20
+        or check the return value explicitly.
+        BOUNDARY: V14 covers ERC20 token.transfer()/transferFrom() return
+        value checks. Low-level call()/delegatecall()/staticcall() return
+        values belong to V02.
         MANDATORY CHECK for deposit/reserve accounting:
           For every function that transfers tokens INTO the contract AND adds
           the transfer amount to an internal accounting variable, verify:
@@ -393,9 +413,13 @@ security_audit_task:
         cooldowns, deadlines; assess impact of ±15 s miner manipulation;
         verify < vs <= boundary operators.
 
-    V17 Initializer security — for upgradeable contracts: single-use
-        enforcement, _disableInitializers() on implementation, re-init
-        vectors after upgrade, constructor vs initializer confusion.
+    V17 Initializer security — only relevant for upgradeable proxy contracts.
+        If the skeleton shows no `initialize()` function, no `upgradeTo`/
+        `upgradeToAndCall`, and no Proxy or UUPSUpgradeable base contract,
+        mark V17 status="not_applicable" ("No proxy pattern detected.").
+        Otherwise check: single-use enforcement, _disableInitializers() on
+        implementation, re-init vectors after upgrade, constructor vs
+        initializer confusion.
 
     V18 State-lock DoS — boolean flags or status enums settable to a terminal
         value (e.g. permanently paused, permanently locked) with no recovery
@@ -423,6 +447,8 @@ security_audit_task:
     }
 
     `findings` is an array of Finding objects with source="manual_review".
+    Finding IDs use the format MAN-NNN (3-digit zero-padded, start at MAN-001,
+    increment sequentially: MAN-001, MAN-002, MAN-003, ...).
     confidence 0.0-1.0: 1.0 = 100% exploitable, 0.5 = requires further analysis.
 
     Full output shape:
@@ -484,6 +510,8 @@ threat_modeling_task:
 
   expected_output: >
     A JSON array of Finding objects with source="threat_model".
+    Finding IDs use the format TM-NNN (3-digit zero-padded, start at TM-001,
+    increment sequentially: TM-001, TM-002, TM-003, ...).
     Each finding must have: id, source, title, severity, category,
     location, description, impact, recommendation.
 
