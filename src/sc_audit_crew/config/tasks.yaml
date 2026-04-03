@@ -780,7 +780,7 @@ peer_review_task:
       [ID] | severity_in → severity_out | gate: <gate name> | reason: <one phrase>
       Gate names: NORMALIZATION, CRITICAL-GATE, CODE-DEFECT, DOWNGRADE,
                   MULTI-PRECONDITION, CONFIDENCE, MATH-CHECK, ACCOUNTING-GATE,
-                  REENTRANCY-FP, UNUSED-VAR, NO-CHANGE.
+                  REENTRANCY-FP, REENTRANCY-CEI-ONLY, UNUSED-VAR, NO-CHANGE.
       Every surviving finding must have at least one line. If multiple gates
       apply to one finding, write one line per gate in the order they were
       applied. Use NO-CHANGE if a finding passed all gates without modification.
@@ -885,6 +885,38 @@ peer_review_task:
          "The function currently follows CEI. Consider adding a nonReentrant
          modifier as an additional safety measure."
          Do NOT retain the SA reentrancy finding at High or Medium.
+
+       REENTRANCY-CEI-ONLY GATE: Applies when a MAN (manual_review) reentrancy
+         finding cites ONLY a CEI pattern violation — no Tier 2 read-only
+         stale-value path and no Tier 3 cross-contract stale-state path was
+         identified in the finding description.
+         This gate does NOT apply if:
+           - A specific Tier 3 cross-contract exploit path is described (that
+             analysis stands and the gate is skipped entirely for this finding).
+           - The token is identified as ERC777, has a custom send/receive hook,
+             or the contract implements a flash loan callback interface.
+           - The finding originates from static_analysis (SA findings are
+             handled by the REENTRANCY-FP rule above, not this gate).
+           - The token interface is ambiguous or not stated in the finding
+             description (skip sub-rule 2 below; do not assume SafeERC20).
+         When the gate applies, evaluate in order:
+           1. If the flagged function has a `nonReentrant` modifier:
+              downgrade to Informational. The CEI violation is a defense-in-depth
+              concern only — the guard already blocks re-entry. Replace description
+              with: "CEI ordering violation with nonReentrant guard present.
+              The guard fully prevents Tier 1 re-entry; this is a defense-in-depth
+              observation only."
+           2. If no `nonReentrant` AND the finding explicitly states the only
+              token interface used is standard ERC20 via SafeERC20
+              (transferFrom / transfer, no hooks, no callbacks):
+              cap severity at High; do not allow Critical.
+              Rationale: exploiting a Tier 1 CEI violation requires a re-entrant
+              callback. Standard SafeERC20 transfer/transferFrom provides no
+              callback path — the exploit is only reachable if a hookable token
+              (ERC777 or custom) is substituted. Add to description:
+              "No callback path exists via standard SafeERC20. Critical severity
+              requires an unconditional exploit path; the precondition of a
+              hookable token caps this at High."
 
     4. CRITICAL SEVERITY GATE:
        Before emitting any finding with severity=Critical, answer all three:
