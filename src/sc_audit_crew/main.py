@@ -245,6 +245,63 @@ def _validate_context_budget(full_source: str) -> None:
         )
 
 
+# ------------------------------------------------------------------
+# Protocol-type normalisation
+# ------------------------------------------------------------------
+
+_CANONICAL_PROTOCOL_TYPES = {
+    "vesting", "streaming", "lockup",
+    "AMM", "lending", "bridge", "governance", "staking", "vault", "generic",
+}
+
+# Priority order: most specific first.
+_PROTOCOL_TYPE_KEYWORDS: dict[str, list[str]] = {
+    "vesting":    ["vest", "cliff", "grant", "unlock", "drip", "entitlement", "salary", "payroll"],
+    "streaming":  ["stream", "flow", "sablier"],
+    "lockup":     ["lockup", "lock-up", "time-lock", "escrowed"],
+    "AMM":        ["amm", "swap", "dex", "liquidity", "uniswap", "curve", "balancer"],
+    "lending":    ["lend", "borrow", "collateral", "cdp", "debt", "credit", "aave", "compound"],
+    "bridge":     ["bridge", "cross-chain", "crosschain", "relay", "wormhole"],
+    "governance": ["governance", "voting", "dao", "proposal", "governor"],
+    "staking":    ["stak", "validator", "delegation", "restake"],
+    "vault":      ["vault", "erc4626", "4626", "yield", "strategy", "harvest", "yearn"],
+}
+
+
+def _normalize_protocol_type(raw: str) -> str:
+    """Map free-text protocol descriptions to a canonical enum value.
+
+    Canonical values: vesting | streaming | lockup | AMM | lending | bridge |
+                      governance | staking | generic
+
+    Logic:
+    1. Exact match (case-insensitive) against canonical values.
+    2. Keyword scan in priority order (first match wins).
+    3. No match → "generic" + WARNING printed to stdout.
+    """
+    lower = raw.strip().lower()
+
+    # 1. Exact match (case-insensitive)
+    for canonical in _CANONICAL_PROTOCOL_TYPES:
+        if lower == canonical.lower():
+            return canonical
+
+    # 2. Keyword scan
+    for canonical, keywords in _PROTOCOL_TYPE_KEYWORDS.items():
+        for kw in keywords:
+            if kw in lower:
+                return canonical
+
+    # 3. Unrecognized
+    options = " | ".join(sorted(_CANONICAL_PROTOCOL_TYPES))
+    print(
+        f"\n[WARNING] Unrecognized --protocol-type '{raw}'. "
+        f"Falling back to 'generic'.\n"
+        f"  Valid values: {options}\n"
+    )
+    return "generic"
+
+
 def build_inputs(ctx: AuditContext, project_root: str, slither_target: str | None = None) -> dict:
     """Build inputs dict for crew.kickoff()."""
     contracts_full_source = "\n\n".join(
@@ -397,7 +454,15 @@ def run():
     parser.add_argument("--tests", help="Path to tests directory or file (.sol / .ts / .js)")
     parser.add_argument("--docs", help="Path to documentation directory or file (.md)")
     parser.add_argument("--flat", help="Path to a pre-flattened .sol file for Slither (all imports inlined)")
-    parser.add_argument("--protocol-type", default="DeFi", help="DEX / Lending / NFT / Bridge / ...")
+    parser.add_argument(
+        "--protocol-type", default="generic",
+        help=(
+            "Protocol category. Canonical values: "
+            "vesting | streaming | lockup | AMM | lending | bridge | governance | staking | vault | generic. "
+            "Free-text synonyms are accepted and normalized (e.g. 'yield-farming' → AMM, "
+            "'cliff-vesting' → vesting). Unrecognized input falls back to 'generic'."
+        ),
+    )
     parser.add_argument("--chain", default="Ethereum mainnet",
                         help="Target chain (e.g. 'Arbitrum', 'Base', 'Polygon'). Affects L2-specific threat model checks.")
     parser.add_argument("--output", default="./output", help="Base output directory")
@@ -422,6 +487,8 @@ def run():
     args = parser.parse_args()
 
     _check_api_keys(args)
+
+    args.protocol_type = _normalize_protocol_type(args.protocol_type)
 
     # ------------------------------------------------------------------
     # Single-step re-run mode
