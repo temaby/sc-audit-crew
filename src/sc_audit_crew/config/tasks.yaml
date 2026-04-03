@@ -287,6 +287,11 @@ security_audit_task:
            a past value without validation. MEDIUM if no check prevents
            back-dated creation producing immediately claimable balances.
 
+    === FUNCTION INVENTORY ===
+    Before checking any vectors, list every non-trivial function in the contract:
+    function_name | visibility | external_calls | state_writes | modifiers
+    === END FUNCTION INVENTORY ===
+
     COVERAGE REQUIREMENT — you MUST reason through ALL 19 vectors below and emit
     exactly one entry per vector in the `coverage` array of your output.
     status="not_applicable" is valid (explain why in one sentence).
@@ -320,6 +325,7 @@ security_audit_task:
 
     V03 Oracle manipulation — price feed staleness, TWAP window manipulation,
         single-block spot price usage, Chainlink latestRoundData() validation.
+        QUICK SKIP: If no call to latestRoundData, getPrice, slot0, observe, or any oracle interface is visible, record not_applicable.
 
     V04 MEV — sandwich attacks on swaps/deposits, frontrunning of admin ops,
         backrunning of liquidations; identify functions where tx ordering affects
@@ -328,10 +334,12 @@ security_audit_task:
     V05 Flash loan composability — state that can be manipulated within a
         single transaction using borrowed liquidity; check price-sensitive
         computations.
+        QUICK SKIP: If no flashLoan, flashBorrow, executeFlashLoan identifier and no single-transaction price-sensitive path is visible, record not_applicable.
 
     V06 Proxy / delegatecall — storage slot collisions, uninitialized
         implementation contracts, selfdestruct in implementation, msg.sender
         context in delegatecall.
+        QUICK SKIP: If no delegatecall keyword, no Proxy / UUPS / Beacon / TransparentProxy base contract, and no upgradeTo / upgradeToAndCall function is present, record not_applicable.
 
     V07 Integer edge cases — overflow/underflow in unchecked blocks; division
         before multiplication; precision loss in multi-step calculations.
@@ -361,6 +369,7 @@ security_audit_task:
 
     V09 Signature replay — missing nonce, domain separator, chain ID in
         EIP-712 / ECDSA flows; cross-contract or cross-chain replay.
+        QUICK SKIP: If no ecrecover, ECDSA.recover, hashTypedData, _useNonce, or permit function is present, record not_applicable.
 
     V10 Business logic — fee calculation errors, rounding that always favours
         one party, invariants that can be broken under normal usage.
