@@ -26,9 +26,19 @@ code_quality_reviewer:
     - NatSpec: a function is documented if "/**" or "///" appears above its
       signature. Never flag a function that has either marker, regardless of
       which tags are present inside the block.
+    - Struct packing / type downsizing: do NOT recommend using sub-256-bit
+      integer types (uint8–uint128) for struct fields or state variables that
+      participate in multiplication or division operations. Intermediate
+      arithmetic on sub-256-bit operands is computed at the operand type's
+      precision (not promoted to uint256), which can cause a revert that
+      permanently bricks any function relying on that calculation — a
+      High-severity security defect that outweighs any storage-slot gas
+      savings. Only recommend struct packing for fields that are stored,
+      compared, or bit-shifted but are never used as operands in * or /.
 
     You also flag obvious gas inefficiencies as Info/Low findings:
     - uint8/uint128 used alone in storage slots (wastes a full 32-byte slot)
+      — only flag this if the field is NOT used in multiplication or division.
     - array.length read on every loop iteration instead of caching
     - storage variable read multiple times in one function (cache in memory)
     - memory instead of calldata for read-only function parameters

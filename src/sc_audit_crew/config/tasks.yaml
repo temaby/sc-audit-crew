@@ -119,7 +119,11 @@ code_quality_review_task:
     5. Function length (>50 lines is a red flag)
     6. Magic numbers (hardcoded values without named constants)
     7. Commented-out code and TODO comments
-    8. Storage layout correctness (especially for upgradeable contracts)
+    8. Storage layout correctness (especially for upgradeable contracts).
+       Do NOT recommend packing sub-256-bit types for fields that participate
+       in multiplication or division — intermediate arithmetic on sub-256-bit
+       operands is computed at operand precision and can cause a revert
+       (see behavioral rules in backstory).
     9. Checked arithmetic / SafeMath:
        - Solidity ≥0.8: checked arithmetic is the default. Flag every
          `unchecked {}` block that lacks a comment explaining why overflow
@@ -291,6 +295,8 @@ security_audit_task:
     Before checking any vectors, list every non-trivial function in the contract:
     function_name | visibility | external_calls | state_writes | modifiers
     === END FUNCTION INVENTORY ===
+    This inventory is for your internal reasoning only and must NOT appear in the JSON output.
+    Do not add a function_inventory key to the output object.
 
     COVERAGE REQUIREMENT — you MUST reason through ALL 19 vectors below and emit
     exactly one entry per vector in the `coverage` array of your output.
@@ -339,7 +345,11 @@ security_audit_task:
     V06 Proxy / delegatecall — storage slot collisions, uninitialized
         implementation contracts, selfdestruct in implementation, msg.sender
         context in delegatecall.
-        QUICK SKIP: If no delegatecall keyword, no Proxy / UUPS / Beacon / TransparentProxy base contract, and no upgradeTo / upgradeToAndCall function is present, record not_applicable.
+        QUICK SKIP: If no delegatecall to an external address (library calls
+        via delegatecall are excluded from this skip condition), no
+        Proxy, TransparentUpgradeableProxy, UUPSUpgradeable, or BeaconProxy
+        base contract, and no upgradeTo / upgradeToAndCall function is present,
+        record not_applicable.
 
     V07 Integer edge cases — overflow/underflow in unchecked blocks; division
         before multiplication; precision loss in multi-step calculations.
@@ -618,7 +628,8 @@ security_audit_task:
 
     V17 Initializer security — only relevant for upgradeable proxy contracts.
         If the source code contains no `initialize()` function, no `upgradeTo`/
-        `upgradeToAndCall`, and no Proxy or UUPSUpgradeable base contract,
+        `upgradeToAndCall`, and no Proxy, TransparentUpgradeableProxy,
+        UUPSUpgradeable, or BeaconProxy base contract,
         mark V17 status="not_applicable" ("No proxy pattern detected.").
         Otherwise check: single-use enforcement, _disableInitializers() on
         implementation, re-init vectors after upgrade, constructor vs
@@ -899,6 +910,8 @@ peer_review_task:
              handled by the REENTRANCY-FP rule above, not this gate).
            - The token interface is ambiguous or not stated in the finding
              description (skip sub-rule 2 below; do not assume SafeERC20).
+         In all excluded cases, the finding passes through this gate unchanged
+         and is evaluated solely by the CRITICAL-GATE in step 4.
          When the gate applies, evaluate in order:
            1. If the flagged function has a `nonReentrant` modifier:
               downgrade to Informational. The CEI violation is a defense-in-depth
