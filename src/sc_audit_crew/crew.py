@@ -97,6 +97,98 @@ _EXPECTED_VECTORS = {
 }
 
 
+# ------------------------------------------------------------------
+# Guardrail callables
+# ------------------------------------------------------------------
+
+_VALID_VECTOR_STATUSES = {"checked", "flagged", "not_applicable"}
+
+
+def _guardrail_security_audit(output) -> tuple[bool, str]:
+    """Assert the security audit coverage matrix is complete and well-formed."""
+    data = _extract_json(output.raw)
+    if not isinstance(data, dict):
+        return (False, "Output is not a valid JSON object. Re-emit the full JSON response with all 19 vectors.")
+
+    coverage = data.get("coverage")
+    if not isinstance(coverage, list):
+        return (False, "Missing or invalid 'coverage' list. Re-emit the complete JSON object with all 19 vectors.")
+
+    covered_ids = set()
+    bad_entries = []
+    for entry in coverage:
+        if not isinstance(entry, dict):
+            bad_entries.append(str(entry))
+            continue
+        vid = entry.get("vector_id")
+        status = entry.get("status")
+        summary = entry.get("summary")
+        finding_ids = entry.get("finding_ids")
+        missing_fields = [
+            f for f, v in [
+                ("vector_id", vid),
+                ("status", status),
+                ("summary", summary),
+                ("finding_ids", finding_ids),
+            ]
+            if not v and v != []
+        ]
+        if missing_fields:
+            bad_entries.append(f"{vid or '?'}: missing fields {missing_fields}")
+        elif status not in _VALID_VECTOR_STATUSES:
+            bad_entries.append(f"{vid}: invalid status '{status}' (must be checked|flagged|not_applicable)")
+        else:
+            covered_ids.add(vid)
+
+    missing_ids = sorted(_EXPECTED_VECTORS - covered_ids)
+
+    errors = []
+    if missing_ids:
+        errors.append(f"Coverage incomplete: missing vectors {missing_ids}.")
+    if bad_entries:
+        errors.append(f"Malformed entries: {bad_entries}.")
+
+    if errors:
+        return (
+            False,
+            " ".join(errors)
+            + " Re-emit all 19 vectors (V01–V19) with required fields"
+            + " vector_id, status (checked|flagged|not_applicable), summary, finding_ids.",
+        )
+
+    return (True, output)
+
+
+def _guardrail_peer_review(output) -> tuple[bool, str]:
+    """Assert the peer review output has required top-level structure."""
+    data = _extract_json(output.raw)
+    if not isinstance(data, dict):
+        return (False, "Output is not a valid JSON object. Re-emit the complete JSON response.")
+
+    errors = []
+
+    deduplicated_findings = data.get("deduplicated_findings")
+    if not isinstance(deduplicated_findings, list):
+        errors.append("'deduplicated_findings' must be a list.")
+
+    stats = data.get("stats")
+    if not isinstance(stats, dict):
+        errors.append("'stats' must be an object.")
+    else:
+        required_stat_keys = {"total_before", "by_severity", "informational_dedup_confirmed"}
+        missing_stat_keys = sorted(required_stat_keys - stats.keys())
+        if missing_stat_keys:
+            errors.append(f"'stats' is missing required keys: {missing_stat_keys}.")
+
+    if errors:
+        return (
+            False,
+            " ".join(errors) + " Re-emit the complete JSON object with all required fields.",
+        )
+
+    return (True, output)
+
+
 class _SecurityAuditCallback:
     """Callback for security_audit_task: saves .md and prints a coverage matrix summary."""
 
@@ -114,25 +206,16 @@ class _SecurityAuditCallback:
             return
 
         coverage = data.get("coverage", [])
-        covered = {entry.get("vector_id") for entry in coverage if entry.get("vector_id")}
-        missing = _EXPECTED_VECTORS - covered
+        covered_count = sum(1 for e in coverage if e.get("vector_id"))
 
-        # Status symbol per entry
         _sym = {"checked": "✓", "flagged": "!", "not_applicable": "—"}
-        total = len(_EXPECTED_VECTORS)
-        covered_count = len(covered)
-
-        print(f"  >> Coverage matrix: {covered_count}/{total} vectors")
+        print(f"  >> Coverage matrix: {covered_count}/{len(_EXPECTED_VECTORS)} vectors")
         for entry in sorted(coverage, key=lambda e: e.get("vector_id", "")):
             vid = entry.get("vector_id", "?")
             status = entry.get("status", "?")
             sym = _sym.get(status, "?")
             label = entry.get("vector", "")
             print(f"       {sym} {vid} {label}")
-        if missing:
-            for vid in sorted(missing):
-                print(f"       ✗ {vid} MISSING from coverage")
-            print(f"  >> WARNING: {len(missing)} vector(s) not covered: {sorted(missing)}")
 
 
 class _PeerReviewCallback:
@@ -294,6 +377,8 @@ class SmartContractAuditCrew:
             config=self.tasks_config["security_audit_task"],
             callback=_SecurityAuditCallback(self.output_dir) if self.output_dir else None,
             async_execution=True,
+            guardrails=[_guardrail_security_audit],
+            guardrail_max_retries=1,
         )
 
     @task
@@ -309,6 +394,8 @@ class SmartContractAuditCrew:
         return Task(
             config=self.tasks_config["peer_review_task"],
             callback=_PeerReviewCallback(self.output_dir) if self.output_dir else None,
+            guardrails=[_guardrail_peer_review],
+            guardrail_max_retries=1,
         )
 
     @task
