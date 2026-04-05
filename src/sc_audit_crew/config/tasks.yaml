@@ -10,20 +10,15 @@
 #                             state variable declarations, events, modifiers,
 #                             and NatSpec. Function bodies omitted.
 #                             Used by: threat_modeling_task
-#                             NOTE: do NOT pass full source here — it inflates
-#                             context for architectural analysis unnecessarily.
+#                             NOTE: do NOT pass full source here.
 #
-# {slither_target}          — Path passed to the Slither CLI (may be a single
-#                             .sol file or a Hardhat/Foundry project directory).
+# {slither_target}          — Path passed to the Slither CLI.
 #                             Used by: static_analysis_task
 #
-# {project_root}            — Root directory of the contract project (used by
-#                             Slither to resolve remappings and imports).
+# {project_root}            — Root directory of the contract project.
 #                             Used by: static_analysis_task
 #
-# {contract_names}          — Comma-separated list of primary contract names
-#                             (without .sol extension) for Slither output
-#                             filtering.
+# {contract_names}          — Comma-separated list of primary contract names.
 #                             Used by: static_analysis_task
 #
 # {specification}           — Free-text protocol specification or README.
@@ -58,13 +53,24 @@
 #                             Used by: report_writing_task
 #                             REQUIRED FORMAT (one entry per line):
 #                               contracts/Vault.sol (312 lines)
-#                               contracts/interfaces/IVault.sol (48 lines)
-#                             The report_writer extracts the number inside
-#                             "(N lines)" verbatim — any other format will
-#                             cause incorrect line counts in the Scope table.
+#                             The report_writer extracts "(N lines)" verbatim.
 #
 # {deployed_address}        — On-chain address if already deployed.
 #                             Optional. Used by: threat_modeling_task
+#
+# {pre_skipped_vectors}     — Comma-separated vector IDs pre-verified as not
+#                             applicable by Python static analysis before kickoff
+#                             (e.g. "V03, V05, V06, V09, V17, V19"), or "None".
+#                             Used by: security_audit_task
+#
+# CANONICAL LOCATION SCHEMA — used by all tasks:
+#   {
+#     "file":       string  — relative path to the source file
+#     "line_start": integer — first line of the relevant code
+#     "line_end":   integer — last line (optional; omit if single-line)
+#     "function":   string  — enclosing function name (omit for architecture findings)
+#   }
+#   Architecture-level findings use: {"file": "architecture", "line_start": 0}
 # =============================================================================
 
 code_quality_review_task:
@@ -98,9 +104,11 @@ code_quality_review_task:
          c. Do NOT flag: transfers to fixed admin or protocol addresses;
             transfers to msg.sender in a user-initiated withdrawal where
             the caller is the sole recipient of their own funds.
-         d. Recommend a withdrawal pattern: record a claimable balance
-            in storage and require the recipient to call a separate claim
-            function to pull their funds.
+         d. Only if a finding is raised under (b): recommend a withdrawal
+            pattern — record a claimable balance in storage and require
+            the recipient to call a separate claim function to pull their funds.
+            Do NOT emit this recommendation if the function is already a
+            user-initiated claim where msg.sender pulls their own funds.
     3. NatSpec comments on all public and external functions.
        MANDATORY VERIFICATION PROCEDURE — follow this for every function:
          a. Scan upward from the function signature until you hit either:
@@ -108,13 +116,8 @@ code_quality_review_task:
             - a "///" line (single-line NatSpec) → function IS documented. STOP.
             - a blank line or a closing "}" of another function → no documentation found.
          b. Only if step (a) found no "/**" or "///" → create a missing_natspec finding.
-         NatSpec blocks can be any number of lines long. Do not limit your scan to N lines.
-       Valid NatSpec formats (any of these counts as full documentation):
-         - /** @notice ... */ multi-line block (may span multiple lines with leading *)
-         - /// @notice single-line tag
-         - /** ... */ block without tags still counts IF it contains a description
        A line like " * @notice ..." inside a /** */ block IS a valid @notice tag.
-       NEVER flag a function that has /** or /// above it, regardless of which tags are present.
+       NEVER flag a function that has /** or /// above it.
     4. Meaningful names for variables, functions, and contracts
     5. Function length (>50 lines is a red flag)
     6. Magic numbers (hardcoded values without named constants)
@@ -138,24 +141,21 @@ code_quality_review_task:
 
     Test files (if provided — identify untested functions and missing edge cases):
     {test_code}
+    If {test_code} is empty or contains only placeholder text, skip the test coverage analysis section entirely.
 
     OUTPUT RULES:
     - CONSOLIDATION (mandatory): if the same issue type appears in N locations,
       output EXACTLY ONE finding. List all affected functions/lines in the
-      description as a bullet list. This applies especially to: missing NatSpec,
-      magic numbers, visibility, naming conventions, missing events.
-      Never output N identical findings for the same issue type.
+      description as a bullet list.
     - Maximum 5 Informational findings total (consolidate aggressively).
     - Before writing each finding, check: have I already written a finding with the
       same title or same location? If yes — skip it.
-    - When you have no more distinct issues to report, STOP. Output the closing ] and finish.
-      Do NOT pad the output with repeated or fabricated findings to reach any target count.
+    - When you have no more distinct issues to report, STOP.
     - Maximum 40 findings total (including the 5 Informational cap above).
-    - PRIORITY AT CAP: if you reach 40 findings while distinct issues
-      remain, keep findings in this priority order and drop from the
-      bottom: (1) High/Medium severity findings, (2) CEI and access
-      control violations, (3) NatSpec and naming issues, (4) gas
-      optimizations and Informational findings last.
+    - PRIORITY AT CAP: at the 40-finding limit, preserve in severity order:
+      High → Medium → Low → Informational. Within the same severity tier,
+      prefer security-relevant findings (CEI, access control, overflow) over
+      style and gas findings (NatSpec, naming, magic numbers).
 
   expected_output: >
     A JSON array of Finding objects with fields:
@@ -184,30 +184,46 @@ code_quality_review_task:
 
 static_analysis_task:
   description: >
-    Run Slither on the project contracts.
+    Process the pre-computed Slither output below into the enriched finding schema.
+    Do NOT call SlitherTool — the raw data is already provided here.
 
-    Project root / target: {slither_target}
-    Project contract names: {contract_names}
-    Original source directory: {project_root}
+    Raw Slither output:
+    {static_analysis_raw}
 
-    Steps:
-    1. Run SlitherTool to analyze {slither_target}.
-       Use {contract_names} to filter output to the target contracts and
-       {project_root} as the project root for import resolution.
-       (Pass these values using the tool's own documented parameter names.)
-    2. Filter false positives:
-       - "calls-loop" in pure/view functions with no state change → Info, not Medium
-       - "divide-before-multiply" when intentional integer truncation is used
-    3. Normalize severity and map confidence to a 0.0–1.0 float:
-       Slither confidence → numeric: high=0.9, medium=0.6, low=0.3
-       High impact + High confidence → Critical or High
-       High impact + Medium confidence → High
-       Medium → Medium
+    If tool_status.slither is "not_installed" or "error", return the object unchanged.
 
-    IMPORTANT: If SlitherTool returns an error or is not installed, you MUST return ONLY:
-    {"tool_status": {"slither": "not_installed"}, "findings": []}
-    Do NOT simulate or guess tool output. An empty findings list is correct and expected.
-    Manual security review is handled separately by the security_auditor agent.
+    Otherwise, for each entry in "findings", perform:
+
+    1. FALSE POSITIVE FILTERING:
+       - "calls-loop" whose affected function is pure or view (no state writes) →
+         keep but downgrade to Informational severity.
+       - "divide-before-multiply" where the code comment or context makes clear that
+         integer truncation is intentional → keep but downgrade to Informational.
+       - "timestamp" (indirect dependency via call chain):
+         trace back to the ACTUAL timestamp-dependent comparison. Low-confidence
+         timestamp findings with no realistic miner-manipulation path → Informational.
+         Do NOT describe the terminal comparison as the dangerous site; name the
+         upstream boundary check that uses block.timestamp.
+
+    2. SEVERITY + CONFIDENCE NORMALIZATION:
+       Use the raw "impact" and "confidence" string fields:
+         Confidence string → float: High→0.9, Medium→0.6, Low→0.3
+         High impact + High confidence   → High
+         High impact + Medium confidence → High
+         High impact + Low confidence    → Medium
+         Medium impact (any confidence)  → Medium
+         Low impact (any confidence)     → Low
+       (Critical is determined by severity_calibration_task, not here.)
+
+    3. SCHEMA ENRICHMENT:
+       Assign sequential IDs (SA-001, SA-002, …).
+       For each finding produce:
+         id, source="static_analysis", title (human-readable, ≤10 words),
+         severity (normalized above), category (e.g. integer_precision,
+         reentrancy, access_control, …), location object with file/line_start/function,
+         description (explain the vulnerability, citing the actual code site),
+         impact (what can go wrong), recommendation (concrete fix),
+         detector (original Slither check name), confidence (0.0–1.0 float).
 
   expected_output: >
     JSON with two sections:
@@ -231,10 +247,8 @@ static_analysis_task:
         }
       ]
     }
-    Finding IDs use the format SA-NNN (3-digit zero-padded, starting at
-    SA-001, incrementing sequentially: SA-001, SA-002, SA-003, ...).
-    Every finding must include detector (the Slither check name) and
-    confidence (0.0-1.0 float).
+    Finding IDs use the format SA-NNN (3-digit zero-padded, starting at SA-001).
+    Every finding must include detector (Slither check name) and confidence (0.0-1.0 float).
 
   agent: static_analysis_agent
 
@@ -249,12 +263,15 @@ security_audit_task:
 
     Additional documentation:
     {documentation}
+    If {documentation} is empty or 'N/A', no additional documentation was provided — proceed without it.
 
     Known risks disclosed by the team:
     {known_risks}
+    If {known_risks} is empty or 'N/A', no team-acknowledged risks were disclosed — proceed without this input.
 
     Test files (use to identify what is NOT covered by tests):
     {test_code}
+    If {test_code} is empty or contains only placeholder text, skip the test coverage analysis section entirely.
 
     Protocol: {protocol_type} on {chain}
 
@@ -262,418 +279,157 @@ security_audit_task:
     "vesting", "streaming", or "lockup". For all other protocol types,
     skip this block entirely.
 
-    When activated, the checks below are MANDATORY. They map directly to
-    existing V-vectors — run them as part of those vectors, record findings
-    under the corresponding V-IDs, and include the finding IDs in the
-    relevant V-coverage entry's finding_ids array. Do NOT create separate
-    PT-labelled findings and do NOT add a pt_coverage key to your output.
+    When activated, these checks are MANDATORY. Run them as part of their
+    mapped V-vectors; record findings under those V-IDs; include finding IDs
+    in the relevant V-coverage entry's finding_ids array. Do NOT create
+    separate PT-labelled findings.
 
-    PT-A → V10: every termination/revocation/cancel/slash function preserves
-           earned-but-unclaimed tokens. Verify end-to-end storage writes.
-           HIGH if the function zeros or deletes the full entitlement record
-           without first crediting already-earned tokens.
-    PT-B → V10 ACTIVATION GUARD COMPLETENESS: after deactivation, every
-           field the creation function tests to prevent duplicate entries
-           is either fully reset to zero or an explicit reset path exists.
-           MEDIUM if any creation-guard field retains a non-zero value with
-           no reset path, permanently blocking re-use of that key.
-    PT-C → V13 HISTORICAL VIEW FUNCTION AUDIT: every view function that
-           accepts a timestamp or block parameter returns a value computed
-           purely from state as of that timestamp — not max(historical,
-           current_accumulated). MEDIUM per function violated.
-    PT-D → V15 RATE FLOOR CHECK: per-interval payout cannot silently floor
-           to zero under any non-pathological low-decimal input scenario.
-           MEDIUM if a zero-rate schedule can be created without reverting.
-    PT-E → V14: fee-on-transfer, rebasing, ERC777 callback, and two-address
-           proxy token compatibility. MEDIUM each unless the documentation
-           explicitly restricts the token type.
-    PT-F → V11 TIME PARAMETER INVARIANTS: start timestamps cannot be set to
-           a past value without validation. MEDIUM if no check prevents
-           back-dated creation producing immediately claimable balances.
+    PT-A → V10: termination/revocation functions preserve earned tokens. HIGH if violated.
+    PT-B → V10: activation guard completeness after deactivation. MEDIUM if violated.
+    PT-C → V13: historical view functions return timestamp-scoped values only. MEDIUM per function.
+    PT-D → V15: rate floor check — per-interval payout cannot be zero. MEDIUM if violated.
+    PT-E → V14: fee-on-transfer: Medium, rebasing: Medium, two-address: Medium, ERC777: High (see V14.md for downgrade conditions).
+    PT-F → V11: start timestamp backdating validation. MEDIUM if violated.
 
     === FUNCTION INVENTORY ===
-    Before checking any vectors, list every non-trivial function in the contract:
-    function_name | visibility | external_calls | state_writes | modifiers
+    Before checking any vectors, list every non-trivial function in the contract.
+    Use COMPACT single-line format — DO NOT write paragraphs:
+    functionName | visibility | ext_calls(yes/no) | state_writes(yes/no) | modifiers
     === END FUNCTION INVENTORY ===
-    This inventory is for your internal reasoning only and must NOT appear in the JSON output.
-    Do not add a function_inventory key to the output object.
+    This inventory is for your internal reasoning only. Do NOT include it
+    in the JSON output and do NOT add a function_inventory key to the output object.
 
-    COVERAGE REQUIREMENT — you MUST reason through ALL 19 vectors below and emit
-    exactly one entry per vector in the `coverage` array of your output.
-    status="not_applicable" is valid (explain why in one sentence).
-    Omitting a vector ID entirely is NOT allowed.
+    SCRATCHPAD BREVITY — the scratchpad feeds your reasoning but must stay compact
+    to leave room for the full 19-vector JSON output:
+    - Function inventory: one line per function, no prose.
+    - Per-vector notes: MAX 2 lines each (one for the finding, one for the coverage decision).
+    - Do NOT write lengthy explanations in the scratchpad. Reserve detail for the JSON output.
 
-    Security vectors (V01–V19):
+    OUTPUT ORDER — emit the JSON as follows to avoid truncation:
+    1. First emit all QUICK SKIP vectors as compact not_applicable entries.
+    2. Then emit the remaining checked/flagged vectors.
+    This ensures the coverage array is complete even if the response runs long.
 
-    V01 Reentrancy — apply this three-tier model for every external call:
-        TIER 1 Same-contract: re-entering the same or another mutating function
-          on this contract. Fully blocked by `nonReentrant` — do not flag if
-          the modifier is present.
-        TIER 2 Read-only (same contract): a view on THIS contract is called
-          externally while an outbound call is in flight; stale value has no
-          on-chain financial consequence → Low at most. `nonReentrant` does
-          NOT block this tier.
-        TIER 3 Cross-contract: a DIFFERENT in-scope contract reads this
-          contract's state (via view or storage) while its outbound call is
-          in flight AND uses that stale value for a financial decision (price,
-          collateral, liquidation). `nonReentrant` on THIS contract does NOT
-          block Tier 3. Verify: (a) another contract calls a view here,
-          (b) the result drives a financial decision, (c) the value can be
-          stale during the outbound call. All three YES → High or Critical.
+    COVERAGE REQUIREMENT — you MUST reason through ALL 19 vectors and emit
+    exactly one coverage entry per vector. Omitting a vector ID is NOT allowed.
 
-    V02 Access control — missing or incorrect modifiers; privilege escalation
-        paths; functions that should be restricted but are public/external.
-        Also: low-level call()/delegatecall()/staticcall() return values must
-        be checked — an unchecked false return is a silent failure.
-        BOUNDARY: V02 covers only low-level call()/delegatecall()/staticcall()
-        return values. ERC20 token.transfer()/transferFrom() return value
-        checks (SafeERC20, silent-false tokens like USDT/BNB) belong to V14.
+    PRE-SKIPPED VECTORS — Python static analysis has pre-verified the following
+    vector IDs as not applicable to this contract's source code:
+    {pre_skipped_vectors}
+    For EACH vector ID listed above: record status="not_applicable",
+    summary="Pre-verified not applicable by static analysis." Do NOT call
+    VectorReadTool for these vectors. If the value is "None", all 19 vectors
+    apply and must be processed normally.
 
-    V03 Oracle manipulation — price feed staleness, TWAP window manipulation,
-        single-block spot price usage, Chainlink latestRoundData() validation.
-        QUICK SKIP: If no call to latestRoundData, getPrice, slot0, observe, or any oracle interface is visible, record not_applicable.
+    VECTOR PROCEDURE — for each vector below:
+    1. Check the QUICK SKIP condition (and PRE-SKIPPED VECTORS list above).
+       If it applies: record status="not_applicable" with the skip reason. Proceed to the next vector.
+    2. If no quick skip: call VectorReadTool with the vector ID string
+         (e.g. "V07", "V14" — just the ID, no file extension).
+    3. Read the entire returned content before beginning analysis for that vector.
+    4. Apply the procedure to the contract using your FUNCTION INVENTORY.
+    5. Record findings and your coverage entry for THIS vector.
+    SEQUENTIAL ANALYSIS RULE: complete step 5 for the current vector before
+    making the next VectorReadTool call. Do not batch tool calls. Do not defer
+    coverage entries to the end of the run.
+    6. If VectorReadTool returns an error string starting with "Error:":
+         record status="tool_error",
+         summary="VectorReadTool could not load the procedure for this vector."
+         and continue to the next vector. Do not halt the audit.
 
-    V04 MEV — sandwich attacks on swaps/deposits, frontrunning of admin ops,
-        backrunning of liquidations; identify functions where tx ordering affects
-        outcome.
-
-    V05 Flash loan composability — state that can be manipulated within a
-        single transaction using borrowed liquidity; check price-sensitive
-        computations.
-        QUICK SKIP: If no flashLoan, flashBorrow, executeFlashLoan identifier and no single-transaction price-sensitive path is visible, record not_applicable.
-
-    V06 Proxy / delegatecall — storage slot collisions, uninitialized
-        implementation contracts, selfdestruct in implementation, msg.sender
-        context in delegatecall.
-        QUICK SKIP: If no delegatecall to an external address (library calls
-        via delegatecall are excluded from this skip condition), no
-        Proxy, TransparentUpgradeableProxy, UUPSUpgradeable, or BeaconProxy
-        base contract, and no upgradeTo / upgradeToAndCall function is present,
-        record not_applicable.
-
-    V07 Integer edge cases — overflow/underflow in unchecked blocks; division
-        before multiplication; precision loss in multi-step calculations.
-        CRITICAL PATTERN — intermediate type truncation:
-          In Solidity, arithmetic is performed in the type of the operands.
-          When two values of ANY sub-256-bit type (uint8, uint32, uint96,
-          uint112, uint128, etc.) are multiplied, the product is computed
-          at the operand type's precision, NOT promoted to uint256 — even
-          with Solidity ≥0.8 checked arithmetic.
-          If the product can exceed the type's max under realistic inputs,
-          the multiplication REVERTS, permanently bricking any function that
-          calls it (e.g., withdrawals, claims). This is HIGH severity.
-          The general rule: for every multiplication `a * b` in the code,
-          identify the declared types of a and b. If either is not already
-          uint256, check whether the product can overflow that type.
-          Fix: cast at least one operand to uint256 first:
-            `uint256(a) * b / c` instead of `a * b / c`.
-          Example of the pattern: `uint112 a; uint40 b; result = a * b / c;`
-          — the product is uint112, not uint256.
-          Severity note: the default severity for this pattern is HIGH.
-          The peer reviewer may upgrade to Critical if the bricked function
-          is a primary withdrawal or claim path and the revert affects all
-          users unconditionally with no workaround path.
-
-    V08 DoS — unbounded loops over storage arrays, forced revert griefing
-        (push payments to contracts), block gas limit attacks.
-
-    V09 Signature replay — missing nonce, domain separator, chain ID in
-        EIP-712 / ECDSA flows; cross-contract or cross-chain replay.
-        QUICK SKIP: If no ecrecover, ECDSA.recover, hashTypedData, _useNonce, or permit function is present, record not_applicable.
-
-    V10 Business logic — fee calculation errors, rounding that always favours
-        one party, invariants that can be broken under normal usage.
-        MANDATORY FOR ALL PROTOCOL TYPES — check the following regardless of
-        {protocol_type}:
-          - Fee calculations: verify that no rounding error systematically
-            favours the protocol over users (or vice versa). A consistent
-            1-wei-per-operation bias at scale is a High finding.
-          - Invariants: identify the core accounting invariant (e.g.
-            k = reserve0 * reserve1 for AMMs, totalBorrowed ≤ totalDeposited
-            for lending, sumEntitlements ≤ balance for vesting). Verify the
-            invariant holds after every state-mutating function.
-          - Rounding direction: verify division truncation always rounds in
-            the direction that protects users (for lending: round up for
-            debt, round down for rewards; for AMMs: round amounts-in up and
-            amounts-out down to protect the pool invariant; general
-            principle: rounding must never systematically advantage the
-            protocol at the expense of users or vice versa).
-        If the contract handles no token balances and performs no fee
-        calculations, record V10 status='not_applicable' with
-        summary='Contract contains no asset-management logic; fee and
-        invariant checks not applicable.'
-        VESTING-SPECIFIC EXTENSION — apply ONLY if {protocol_type} contains
-        "vesting", "streaming", or "lockup". For all other protocol types,
-        skip the termination and guard-completeness checks below:
-          Identify every function whose purpose is to terminate, shorten, or
-          remove a user's ongoing entitlement — regardless of its name.
-          Look for verbs and concepts such as: revoke, cancel, terminate,
-          forfeit, slash, withdraw-for-admin, remove, close, wipe, zero-out,
-          early-exit, or any function that deletes or resets a user record.
-          For each such function, verify:
-            1. Are tokens that have ALREADY VESTED (or streamed, or accrued)
-               but NOT YET WITHDRAWN preserved for the user?
-            2. Does the function correctly separate "earned but unclaimed"
-               from "future entitlement"? Only future entitlement should be
-               removed.
-          Correct behavior: user retains access to their already-earned
-          portion even after termination.
-          HIGH-severity fund-loss bug: the function zeros or deletes the
-          entire entitlement record (e.g. the full claim struct) without
-          first crediting already-earned tokens, making them unrecoverable.
-          Trace each such function end-to-end. Do not rely on function names
-          alone — inspect the actual storage writes.
-          ACTIVATION GUARD COMPLETENESS: After verifying token preservation,
-          also check whether deactivation leaves the record key reusable.
-          Enumerate all fields that the record-CREATION function tests to
-          prevent duplicate entries for the same key (address, ID, slot).
-          Verify that every such guard field is either (a) fully reset to
-          its zero/initial value during deactivation, OR (b) an explicit
-          admin function exists to reset it. If ANY creation-guard field
-          retains a non-zero value after deactivation and no reset path
-          exists, the key is permanently blocked from re-use — emit Medium.
-
-    V11 Admin setter validation — zero-value inputs silently accepted;
-        cross-variable invariants broken by partial updates (e.g. minStake >
-        maxStake after one setter call); missing events on critical changes.
-
-        MANDATORY CROSS-INVARIANT ENUMERATION: for every setter pair that
-        controls related bounds, explicitly enumerate the pair and its invariant
-        by following this procedure:
-        1. Identify all state variables that form a logical pair or group
-           (e.g. a lower bound and an upper bound on the same quantity,
-           a set of fees/rates that must sum to ≤ 100%, a cooldown that
-           must be shorter than a lock period).
-        2. For each such pair, write down the invariant in plain English
-           (e.g. "lower bound must be ≤ upper bound").
-        3. Check whether each setter validates the invariant against the
-           CURRENT stored value of its counterpart before writing.
-        4. If any setter allows an update that can violate the invariant
-           without reverting, emit a High finding — an admin error can
-           permanently block user transactions with no recovery path.
-        TIME PARAMETER INVARIANTS: For functions that accept timestamp-based
-        schedule parameters, add these to the cross-invariant enumeration:
-          - Can a start timestamp be set to a past value with no validation?
-            If yes, a newly created record may carry an immediately claimable
-            balance at the moment of creation. Severity: MEDIUM regardless of
-            whether the documentation permits backdating — a back-dated
-            allocation with large amount silently becomes immediately fully
-            claimable and cannot be corrected after creation. Note any explicit
-            documentation permission as a mitigating factor in the description
-            but preserve the MEDIUM rating.
-          - Does the combination of an interval parameter and a total-amount
-            parameter produce a per-interval payout of zero under any
-            non-pathological input (e.g. small amounts with low-decimal
-            tokens)? Zero-rate schedules silently distribute nothing —
-            flag as MEDIUM (not Low) and recommend a minimum-rate validation
-            at record-creation time.
-
-    V12 Forced state changes — identify any external actor who can push the
-        contract into a different state without the user's consent; trace the
-        full economic consequence for affected users.
-
-    V13 Asset accounting — every path where tokens enter or leave the contract
-        must update the corresponding internal ledger variable; verify
-        internal balance == actual token balance at all exit points.
-        HISTORICAL VIEW FUNCTION AUDIT (mandatory loop — run for EVERY external
-        or public view function that accepts a timestamp or block number as a
-        parameter):
-          1. List all such functions explicitly.
-          2. For each: verify the return value is computed purely from state
-             as of that timestamp. Any post-timestamp accumulated state must
-             not influence the result.
-          3. Anti-pattern to detect: `return max(f(timestamp), currentTotal)`
-             where `currentTotal` includes activity after `timestamp`. This
-             corrupts governance snapshots, reward calculations, and off-chain
-             auditing tools even when individual withdrawals are correct.
-          4. Emit MEDIUM for every such function found — this is an
-             externally observable integrity violation, not a gas issue.
-
-    V14 Non-standard ERC20 — four mandatory sub-checks. Before working through
-        the detail below, confirm each was attempted in your V14 coverage
-        entry summary:
-          [ ] FEE-ON-TRANSFER: internal accounting uses received amount,
-              not the requested parameter.
-          [ ] REBASING TOKEN: solvency invariant holds if balanceOf
-              changes externally without a transfer event.
-          [ ] TWO-ADDRESS PROXY BYPASS: withdrawal guard uses pre/post
-              balance delta, not address equality.
-          [ ] ERC777 CALLBACK REENTRANCY: state guarding double-withdrawal
-              is committed before the transfer for both admin and user paths.
-        For each sub-check not applicable to this contract, note explicitly
-        why (e.g. "no admin withdrawal function exists") rather than omitting.
-        General: fee-on-transfer tokens (use received amount, not
-        parameter); rebasing tokens; tokens that return false instead of
-        reverting (USDT, BNB); tokens with no return value — use SafeERC20
-        or check the return value explicitly.
-        BOUNDARY: V14 covers ERC20 token.transfer()/transferFrom() return
-        value checks. Low-level call()/delegatecall()/staticcall() return
-        values belong to V02.
-        MANDATORY CHECK for deposit/reserve accounting:
-          For every function that transfers tokens INTO the contract AND adds
-          the transfer amount to an internal accounting variable, verify:
-            1. Is the amount added to internal accounting the token parameter
-               value (i.e. what was requested) rather than the actually
-               received amount (balance_after - balance_before)?
-            2. With a fee-on-transfer token, actual received = amount - fee,
-               so internalBalance accumulates more than the contract holds.
-               Over time the last withdrawer fails (balance < internalBalance).
-          Pattern to detect:
-            `internalVar += amount; token.transferFrom(..., amount);`
-          Correct pattern:
-            `uint before = token.balanceOf(this); token.transferFrom(...,amount);
-             internalVar += token.balanceOf(this) - before;`
-          Emit Medium if this pattern is found and the contract documentation
-          does not explicitly restrict to non-fee-on-transfer tokens.
-        REBASING TOKEN CHECK: For contracts that maintain an internal
-        accounting variable representing token entitlements, verify whether
-        a rebasing token (one whose `balanceOf` values change externally
-        without any transfer event) would cause a divergence:
-          - Positive rebase (balance increases): the excess tokens are stuck
-            in the contract — nobody's internal entitlement covers them.
-          - Negative rebase (balance decreases): the contract becomes
-            insolvent — the last claimants cannot withdraw. The first
-            deposited/locked amount exceeds actual balance.
-        Detection: if the contract sums all outstanding entitlements into an
-        internal counter and uses it to gate withdrawals, a rebasing token
-        will silently break the solvency invariant without any on-chain error.
-        Emit Medium if the contract provides no documentation restriction
-        against rebasing tokens and no constructor/setter validation of this
-        property. Recommend documenting the restriction or adding a rebasing
-        detection pattern (compare two sequential `balanceOf` reads with no
-        intervening transfer to test for external balance change).
-        TWO-ADDRESS / PROXY TOKEN BYPASS: Some tokens expose two addresses
-        that share the same underlying balance (e.g. a proxy address and its
-        implementation). Any function that permits withdrawal of arbitrary
-        tokens and is guarded solely by an address-inequality check against
-        the primary token can be bypassed by supplying the token's alternate
-        address. The correct guard is a pre/post balance comparison on the
-        primary token address, not address equality. Flag as Medium if
-        applicable and if the function is not already restricted to privileged
-        callers (apply the MANDATORY DOWNGRADE RULE if admin-only).
-        ERC777 / CALLBACK TOKEN CHECK (mandatory for every admin withdrawal
-        and every user withdrawal function): If the token supports ERC777 send
-        hooks or any pre/post-transfer callback, the recipient of a `safeTransfer`
-        or `transfer` call can re-enter the calling function before it returns.
-        Always verify CEI first — if all guard state is committed before the
-        transfer, note as defense-in-depth only and do not raise a finding.
-        For admin withdrawal functions: if the surplus calculation
-        (e.g. `balanceOf(this) - reserved`) is not committed to storage before
-        the transfer, apply the CODE DEFECT vs ADMIN MALICE gate:
-          - A well-intentioned admin following documented usage calls the
-            withdrawal function. The ERC777 callback fires automatically —
-            the admin does not need to be malicious. This is a CODE DEFECT.
-            Do NOT apply the MANDATORY DOWNGRADE RULE. Emit HIGH.
-          - If triggering the re-entry requires the admin to deliberately
-            choose an abusive action (beyond ordinary usage), apply the
-            MANDATORY DOWNGRADE RULE and emit Medium.
-        For user withdrawal functions where the caller is arbitrary: if state
-        guarding double-withdrawal is written AFTER the transfer, emit High.
-
-    V15 Decimal scaling — locate every hardcoded magnitude constant (1eN,
-        10**N, PRECISION, DENOMINATOR) used to scale token amounts.
-        For each constant, apply this decision tree (NO external calls needed):
-          1. Does the contract call `token.decimals()` and derive the scale
-             dynamically from that return value?
-             YES → safe, no finding.
-          2. Does the contract have an explicit guard validating the token
-             matches the assumed precision (e.g. `require(token.decimals()==18)`
-             or an equivalent check in the constructor/initializer)?
-             YES → safe, no finding.
-          3. Neither 1 nor 2: the contract assumes a fixed decimal count with
-             no runtime protection.
-             → Determine severity:
-               a. If the token address is a hardcoded constant or well-known
-                  address visible in the source AND its decimals can be read
-                  from the same source file (e.g. `decimals() returns (8)`) →
-                  compare directly. Confirmed mismatch = Critical.
-               b. Otherwise (token injected via constructor/parameter, or
-                  decimals not visible in source) → emit Medium:
-                  "Contract hardcodes a 1eN scaling constant but accepts an
-                  arbitrary token without validating its decimal count.
-                  Any token with different decimals causes systematic
-                  mis-scaling of all amounts."
-        Also flag thresholds defined in raw units while the rest of the
-        contract uses scaled units (or vice versa).
-        RATE FLOOR CHECK (mandatory for protocols that have lockup,
-        vesting, or streaming creation functions, independent of scale-mismatch
-        result: run this even if no decimal mismatch was found above. If no
-        such functions exist in the audited contract, record this sub-check as
-        not applicable and move on):
-        For every lockup, vesting, or streaming creation function, verify
-        that per-interval payout cannot silently floor to zero under a
-        non-pathological input. Apply the following explicit arithmetic test:
-          a. Identify the expression that computes tokens per interval, e.g.:
-             `perInterval = totalAmount * intervalSecs / durationSecs`
-          b. Substitute a realistic low-decimal scenario:
-             totalAmount = 10,000 tokens (6 decimals) = 10_000 * 1e6 = 1e10
-             durationSecs = 10 years = 315_360_000 s
-             intervalSecs = 1 s → numberOfIntervals = 315_360_000
-             perInterval = 1e10 / 315_360_000 ≈ 31 (non-zero — this is fine)
-             But if totalAmount = 1 token = 1e6:
-             perInterval = 1e6 / 315_360_000 = 0 → ZERO RATE
-          c. If the result is zero for any realistic low-decimal, small-amount
-             combination, emit MEDIUM regardless of V15 scale-mismatch result.
-             The contract provides no minimum-rate guard and silently creates
-             non-distributing schedules.
-
-    V16 Timestamp dependence — block.timestamp used for lock expiry,
-        cooldowns, deadlines; assess impact of ±15 s miner manipulation;
-        verify < vs <= boundary operators.
-        L2 block.number semantics: if {chain} is an L2 (Arbitrum, Optimism,
-        Base, zkSync), verify no time-measurement logic relies on block.number
-        to compute durations. On Arbitrum, block.number increments per
-        transaction, not per L1 block — any `endBlock - startBlock` window
-        is severely compressed. Flag any such usage as Medium.
-
-    V17 Initializer security — only relevant for upgradeable proxy contracts.
-        If the source code contains no `initialize()` function, no `upgradeTo`/
-        `upgradeToAndCall`, and no Proxy, TransparentUpgradeableProxy,
-        UUPSUpgradeable, or BeaconProxy base contract,
-        mark V17 status="not_applicable" ("No proxy pattern detected.").
-        Otherwise check: single-use enforcement, _disableInitializers() on
-        implementation, re-init vectors after upgrade, constructor vs
-        initializer confusion.
-
-    V18 State-lock DoS — boolean flags or status enums settable to a terminal
-        value (e.g. permanently paused, permanently locked) with no recovery
-        path, blocking withdrawals.
-
-    V19 Spec vs implementation — if {specification} is empty or fewer than
-        50 words, record status="not_applicable" with summary="No formal
-        specification provided; cross-check not possible." Do not attempt
-        to infer a spec from the code itself.
-        If a specification is provided, cross-check every documented invariant
-        (fees, thresholds, accounting rules, role permissions) against the
-        code; flag divergences as logic findings.
+    QUICK SKIP CONDITIONS:
+    V01 — No quick skip. Always fetch V01.md and check.
+    V02 — No quick skip. Always fetch V02.md and check.
+    V03 — QUICK SKIP if: no call to latestRoundData, getPrice, slot0, observe,
+           or any oracle interface is visible in the source. Record not_applicable.
+    V04 — No quick skip. Fetch V04.md. Note: if no swap/liquidation/auction function
+           exists, focus only on admin op frontrunning risk (see V04.md).
+    V05 — QUICK SKIP if: no flashLoan, flashBorrow, executeFlashLoan identifier
+           AND no single-transaction price-sensitive path is visible. Record not_applicable.
+    V06 — QUICK SKIP if: no delegatecall to an external address (library calls via
+           delegatecall are excluded), no Proxy/TransparentUpgradeableProxy/
+           UUPSUpgradeable/BeaconProxy base contract, and no upgradeTo/upgradeToAndCall
+           function is present. Record not_applicable.
+    V07 — No quick skip. Always fetch V07.md and check all multiplications.
+    V08 — No quick skip. Always fetch V08.md and check.
+    V09 — QUICK SKIP if: no ecrecover, ECDSA.recover, hashTypedData, _useNonce,
+           or permit function is present. Record not_applicable.
+    V10 — No quick skip (escape hatch for no-asset-management contracts is in V10.md).
+           Fetch V10.md and check.
+    V11 — No quick skip. Always fetch V11.md and check all setters.
+    V12 — No quick skip. Always fetch V12.md and check.
+    V13 — No quick skip. Always fetch V13.md and check.
+    V14 — No quick skip. Always fetch V14.md and check all four sub-checks.
+    V15 — No quick skip. Always fetch V15.md and check.
+    V16 — No quick skip. Always fetch V16.md and check.
+    V17 — QUICK SKIP if: source code contains no initialize(), no upgradeTo/
+           upgradeToAndCall, and no Proxy/TransparentUpgradeableProxy/
+           UUPSUpgradeable/BeaconProxy base contract. Record not_applicable.
+    V18 — No quick skip. Always fetch V18.md and check.
+    V19 — QUICK SKIP if: {specification} is empty, a single sentence, or
+           clearly a placeholder (e.g. "N/A", "TBD", "not provided").
+           Record not_applicable, summary="No formal specification provided."
 
     Every finding MUST include an exact line number.
     Distinguish confirmed vs potential vulnerabilities.
-    Aim for ≤30 findings. If you have more, prioritise by impact and consolidate
-    related issues — never omit a confirmed High or Critical to meet the limit.
+    Aim for ≤30 findings. Never omit a confirmed High or Critical to meet the limit.
+    If at the cap, drop lowest-severity findings first: remove Informational first,
+    then Low, then Medium — preserving all High and Critical.
 
   expected_output: >
-    A JSON object with two keys: `coverage` and `findings`.
+    A JSON object with THREE keys: `coverage`, `findings`, and `contract_pragma`.
 
-    `coverage` is an array of exactly 19 entries — one per vector V01–V19:
+    `contract_pragma` — the Solidity pragma string from the primary audited contract,
+    e.g. "^0.8.17" or "0.8.0". Extract from the pragma directive in the source.
+    If multiple contracts have different pragmas, use the most restrictive
+    (lowest minimum compiler version across all audited files — e.g. ^0.8.0
+    is more restrictive than >=0.8.4 <0.9.0 because its minimum is 0.8.0).
+    If pragma cannot be determined, set to "unknown".
+
+    `coverage` is an array of exactly 19 entries — one per vector V01–V19.
+    Coverage entry summary MUST be ≤15 words. Be terse.
     {
       "vector_id": "V01",
       "vector": "reentrancy",
-      "status": "checked" | "flagged" | "not_applicable",
+      "status": "checked" | "flagged" | "not_applicable" | "tool_error",
       "summary": "One sentence: what was verified or why not applicable.",
-      "finding_ids": ["MAN-001"]   // IDs of findings for this vector; [] if none
+      "finding_ids": ["MAN-001"]
     }
 
     `findings` is an array of Finding objects with source="manual_review".
-    Finding IDs use the format MAN-NNN (3-digit zero-padded, start at MAN-001,
-    increment sequentially: MAN-001, MAN-002, MAN-003, ...).
+    Finding IDs: MAN-NNN (3-digit zero-padded, start at MAN-001).
     confidence 0.0-1.0: 1.0 = 100% exploitable, 0.5 = requires further analysis.
+
+    Every finding MUST include all of the following fields.
+    `title` is MANDATORY and must be a non-empty string — never omit it.
+
+    Finding object shape:
+    {
+      "id": "MAN-001",
+      "source": "manual_review",
+      "title": "Short descriptive title (REQUIRED — never empty)",
+      "severity": "Critical|High|Medium|Low|Informational",
+      "category": "reentrancy|overflow|access_control|dos|...",
+      "confidence": 0.0,
+      "location": {
+        "file": "Contract.sol",
+        "line_start": 42,
+        "line_end": 55,
+        "function": "withdraw"
+      },
+      "description": "What is wrong and why it matters.",
+      "impact": "Concrete impact on funds or protocol state.",
+      "recommendation": "How to fix it."
+    }
 
     Full output shape:
     {
+      "contract_pragma": "^0.8.17",
       "coverage": [ /* 19 entries, V01 through V19 */ ],
-      "findings": [ /* Finding objects */ ]
+      "findings": [ /* Finding objects, each with a non-empty title */ ]
     }
+
+    Emit ONLY the JSON object. Do not add any explanation, prose, or commentary outside the JSON fence.
 
   agent: security_auditor
 
@@ -684,6 +440,7 @@ threat_modeling_task:
     {contracts_skeleton}
     Specification: {specification}
     Documentation: {documentation}
+    If {documentation} is empty or 'N/A', no additional documentation was provided — proceed without it.
     Chain: {chain}
     Deployed address (if any): {deployed_address}
 
@@ -711,20 +468,21 @@ threat_modeling_task:
     6. L2 / CHAIN-SPECIFIC RISKS: if {chain} is Arbitrum, Optimism, Base,
        zkSync, or another L2 —
        - Sequencer downtime: does the protocol have a fallback if the L2
-         sequencer is offline? (Chainlink provides a sequencer uptime feed
-         for Arbitrum and Optimism.)
+         sequencer is offline?
        - L2 block.timestamp may differ from L1 finality; flag protocols
          that rely on timestamp precision for auction deadlines or vesting
          cliffs as an architecture-level concern (no line number required).
        - block.number semantics (e.g. Arbitrum increments per transaction):
-         note as an architecture risk if the contract description or state
-         variable names suggest block-counted time windows. Identifying
-         the exact arithmetic requires function bodies, which are outside
-         the provided skeleton — flag any suspected usage and note that
-         V16 in the security audit covers the code-level verification.
+         if state variable names suggest block-counted time windows, emit
+         an Informational architectural note only — do NOT emit Medium or
+         above. Without function bodies, block-number usage cannot be
+         confirmed as unsafe vs. a legitimate epoch counter. Code-level
+         confirmation is deferred to V16 in the security audit.
 
-    Aim for ≤15 findings. If you have more, merge related architectural concerns
-    and prioritise by impact — never omit a confirmed High or Critical.
+    Aim for ≤15 findings. Merge related architectural concerns.
+    Never omit a confirmed High or Critical.
+    If at the cap, drop lowest-severity findings first: remove Informational first,
+    then Low, then Medium — preserving all High and Critical.
 
   expected_output: >
     A JSON object with two keys:
@@ -740,39 +498,39 @@ threat_modeling_task:
       "not_available" — EtherscanTool unavailable, errored, or no deployed_address provided.
       "error"         — Tool returned an unexpected error response.
 
-    Finding IDs use the format TM-NNN (3-digit zero-padded, start at TM-001,
-    increment sequentially: TM-001, TM-002, TM-003, ...).
+    Finding IDs use the format TM-NNN (3-digit zero-padded, start at TM-001).
     Each finding must have: id, source, title, severity, category,
     location, description, impact, recommendation.
 
-    Location format depends on finding type:
-    - Code-level finding (maps to a specific function or line):
-        {"file": "Contract.sol", "line_start": 42, "function": "withdraw"}
-    - Architecture-level finding (no specific line — centralization risk,
-      missing timelock, governance attack surface, external dependency):
-        {"file": "architecture", "line_start": 0, "function": ""}
+    Location format:
+    - Code-level: {"file": "Contract.sol", "line_start": 42, "function": "withdraw"}
+    - Architecture-level: {"file": "architecture", "line_start": 0, "function": ""}
+
+    Emit ONLY the JSON object. Do not add any explanation, prose, or commentary outside the JSON fence.
 
   agent: threat_modeler
 
-peer_review_task:
+dedup_task:
   description: >
-    Consolidate and normalize findings from all agents.
+    Consolidate findings from all four upstream agents into a clean,
+    deduplicated list. Filter structural invalids and technical impossibilities.
 
-    You receive results from:
-    - Code Quality Review
-    - Static Analysis (Slither) — output is {"tool_status": {...}, "findings": [...]}
-    - Manual Security Audit (includes a `coverage` array for vectors V01–V19)
-    - Threat Modeling — output is {"etherscan_status": "...", "findings": [...]};
-      read findings from the `findings` key, log etherscan_status in stats.
+    You receive:
+    - Code Quality Review — JSON array of QA-xxx findings
+    - Static Analysis (Slither) — {"tool_status": {...}, "findings": [...]}
+    - Manual Security Audit — {"contract_pragma": "...", "coverage": [...], "findings": [...]}
+    - Threat Modeling — {"etherscan_status": "...", "findings": [...]}
 
-    EXECUTION PROTOCOL — work through the following phases in order.
-    Before outputting your final JSON, write a reasoning scratchpad between
-    === SCRATCHPAD START === and === SCRATCHPAD END === markers. The scratchpad
-    is required and is not part of the JSON output. Do not use code fences
-    inside the scratchpad. After the scratchpad, output the final JSON inside
-    a ```json ... ``` code fence.
+    Read findings from the "findings" key of each structured output.
+    Extract contract_pragma from the security audit output.
+    Extract etherscan_status from the threat modeling output.
 
-    Inside the scratchpad, complete these four phases in order:
+    EXECUTION PROTOCOL — write your scratchpad between
+    === SCRATCHPAD START === and === SCRATCHPAD END === markers.
+    The scratchpad is required and is NOT part of the JSON output.
+    After the scratchpad, output the final JSON inside a ```json ... ``` code fence.
+
+    Inside the scratchpad, complete these three phases:
     PHASE 1 — INVENTORY
       List every finding ID from all four upstream tasks:
       [ID] | source | title (truncated) | severity
@@ -781,288 +539,116 @@ peer_review_task:
       For each group sharing a location range and root cause:
       CLUSTER: [ID1, ID2, ...] → root cause: <one sentence> → keep: <ID>
 
-    PHASE 3 — TITLE GROUPS
+    PHASE 3 — TITLE GROUPS AND ARCHITECTURE CLUSTERS
       Remaining findings with identical or near-identical titles:
       COLLAPSE [ID1, ID2, ...] → keep: <ID>, merge locations.
-
-    PHASE 4 — GATE CHECKLIST
-      For each surviving finding, record one line per gate that changed or
-      confirmed its severity. Use the format:
-      [ID] | severity_in → severity_out | gate: <gate name> | reason: <one phrase>
-      Gate names: NORMALIZATION, CRITICAL-GATE, CODE-DEFECT, DOWNGRADE,
-                  MULTI-PRECONDITION, CONFIDENCE, MATH-CHECK, ACCOUNTING-GATE,
-                  REENTRANCY-FP, REENTRANCY-CEI-ONLY, UNUSED-VAR, NO-CHANGE.
-      Every surviving finding must have at least one line. If multiple gates
-      apply to one finding, write one line per gate in the order they were
-      applied. Use NO-CHANGE if a finding passed all gates without modification.
+      Architecture clusters by actor:
+      CLUSTER-ARCH [TM-xxx, TM-yyy, ...] → actor: <name> → canonical ID: <highest-severity ID>
 
     Steps:
-    0. COVERAGE AUDIT (run first, before touching findings):
+
+    0. COVERAGE AUDIT (run first):
        Extract the `coverage` array from the Manual Security Audit output.
-       The expected vector IDs are: V01 V02 V03 V04 V05 V06 V07 V08 V09 V10
-                                     V11 V12 V13 V14 V15 V16 V17 V18 V19
-       a. List which IDs are present in the coverage array.
-       b. List which IDs are missing (present in the expected set but absent from coverage).
-       c. Record missing IDs in stats.coverage_gaps.
-       d. For each missing vector, create one Informational finding.
-          Assign IDs with the prefix PR- (peer-reviewer-generated), numbered
-          sequentially: PR-001, PR-002, etc.
-          title="Security vector <VXX> not covered in audit", source="peer_review",
+       Expected vector IDs: V01 V02 V03 V04 V05 V06 V07 V08 V09 V10
+                            V11 V12 V13 V14 V15 V16 V17 V18 V19
+       a. List IDs present in the coverage array (any status counts as present).
+       b. List IDs that are completely absent from the array (no entry at all).
+          A vector with status "not_applicable", "checked", "flagged", or
+          "tool_error" is NOT a gap —
+          it has been reviewed. Only a vector with no entry in the array is a gap.
+       c. Record truly absent IDs in stats_partial.coverage_gaps.
+          If all 19 vectors have entries, set coverage_gaps to [].
+       d. For each truly absent vector (no entry at all), create one Informational finding:
+          id: PR-NNN (sequential), source="peer_review",
+          title="Security vector <VXX> not covered in audit",
           severity="Informational", category="coverage_gap",
           location={file: "audit_process", line_start: 0},
-          description="Vector <VXX> (<label>) was not included in the security audit
-          coverage matrix. The auditor should verify this vector was deliberately
-          skipped as not applicable and document the rationale."
+          description="Vector <VXX> (<label>) had no entry in the security
+          audit coverage matrix. Verify it was deliberately omitted."
 
     1. DEDUPLICATION:
        PRIMARY PASS — SEMANTIC DEDUP (run first):
-         Scan all findings for pairs that share the same root cause AND the same
-         or overlapping location (file + line range), regardless of title.
-         Example: "Integer overflow at line 147" and "Unsafe multiplication of
-         uint112" at the same expression are the same defect. For every such pair:
-           i.  Merge into the higher-severity entry.
-           ii. Add a note: "(also reported as <other-ID>)" in the description.
-         After this pass, verify: no two remaining findings share both an
-         overlapping location range and the same root cause.
+         Find pairs sharing the same root cause AND overlapping location.
+         Two findings share a root cause if they describe the same deficient
+         code path or the same absent guard, even if worded differently.
+         Title similarity is NOT required — compare the cited function name
+         and the described mechanism. If two findings cite the same function
+         with the same impact direction (e.g. both describe unchecked admin
+         grant in setAdmin, or both describe the same arithmetic bug in
+         _baseVestedAmount), they MUST be merged regardless of phrasing.
+         Merge into the higher-severity entry; add "(also reported as <ID>)" note.
+         The merged entry retains the source of the higher-severity finding.
+         If both have equal severity, prefer: manual_review > static_analysis
+         > code_quality > threat_model.
+         Verify: no two remaining findings share both location and root cause.
        SECONDARY PASS — TITLE COLLAPSE:
-         Group remaining findings by title (case-insensitive). For every group
-         with count > 1: collapse into ONE finding. Concatenate all locations
-         into a single bullet list inside the description.
-         Example: 16 "Missing NatSpec" entries → 1 finding listing all 16
-         affected functions. Also applies to repeated code-quality patterns
-         (magic numbers, missing events, visibility) across N functions.
-         This is non-negotiable.
+         Group by title (case-insensitive). Collapse groups with count > 1 into
+         ONE finding with all locations as a bullet list.
+       TERTIARY PASS — ARCHITECTURE CLUSTERS:
+         Scan source="threat_model" findings with location.file="architecture".
+         Group by shared privileged actor AND related categories
+         (centralization, missing timelock, no multisig, unlimited privilege).
+         For each group with count > 1:
+           - Merge into ONE finding titled "Centralization Risk — [actor name]".
+           - Sub-concerns as bullet list in description.
+           - Canonical ID = ID of the highest-severity finding in the group.
+           - Mark others as duplicate_of the canonical ID.
+           - Set source="threat_model", severity = highest in group.
+           - The merged finding passes through calibration gates unchanged by this merge.
        POST-MERGE INFORMATIONAL CHECK:
-         After all merging, no single issue *type* may appear more than once
-         as an Informational finding. Every remaining Informational entry must
-         have a distinct root cause and a specific line reference. If any type
-         still appears more than once, the merge is incomplete — re-examine
-         before continuing.
-         When this check is complete and no type appears more than once,
-         set informational_dedup_confirmed=true in the stats output.
-         Do not output the final JSON until this field is explicitly set.
-         Setting it is your confirmation that the check was completed,
-         not just processed implicitly.
+         After all merging, no single issue type may appear more than once as
+         an Informational finding. Verify each remaining Informational entry
+         has a distinct root cause and a specific line reference.
+         Before writing the final JSON, confirm in your scratchpad that no
+         single issue type appears more than once as an Informational finding,
+         then set informational_dedup_confirmed=true in stats_partial.
 
-    2. SEVERITY NORMALIZATION:
-       Critical: direct loss of funds, no preconditions
-       High: loss of funds under realistic conditions
-       Medium: logic bugs, no direct financial loss
-       Low: best practices, minor risks
-       Info: observations
+    2. FILTERING (apply during dedup, in this order):
+       a. MISSING LOCATION REJECTION:
+          Findings where location is entirely absent: set status="rejected",
+          rejection_reason="missing_location". Exclude from output.
+          EXCEPTION: source="threat_model" + location.file="architecture" +
+          location.line_start=0 → valid architecture findings, accept as-is.
 
-       MANDATORY — UNBOUNDED ARRAY IN VIEW FUNCTION:
-       If any finding describes an unbounded storage array iterated inside
-       an external or public view function with no on-chain pagination and
-       no hard size cap, the minimum severity is MEDIUM regardless of how the
-       upstream agent rated it. Do NOT downgrade to Low or Informational.
-       Confirm all three conditions before applying:
-         (a) the array grows on every record creation with no pruning path,
-         (b) the array is read by a view getter that external callers use,
-         (c) no on-chain pagination or hard size cap exists.
-       All three true → minimum MEDIUM. Override any upstream Low/Info rating.
+       b. SOL08-OVERFLOW FILTER:
+          For any finding from manual_review or static_analysis describing
+          arithmetic that "wraps around" or "silently overflows":
+            - Extract contract_pragma from the security audit output.
+            - If pragma is ≥0.8.0 AND flagged arithmetic is NOT in an `unchecked {}` block:
+              Solidity checked arithmetic will REVERT, not wrap. Set status="rejected",
+              rejection_reason="false_positive: Solidity ≥0.8 checked arithmetic
+              reverts on overflow; no wrap-around occurs outside unchecked blocks."
+            - EXCEPTION: if the finding explicitly describes a REVERT (not wrap-around)
+              — e.g. the V07 intermediate type truncation pattern — do NOT reject.
+              A revert that permanently bricks a withdrawal is a valid High finding.
+            - If pragma is <0.8.0 OR arithmetic is inside `unchecked {}` OR pragma is
+              "unknown": pass the finding through unchanged.
 
-    3. VALIDATION:
-       - Findings where location is entirely absent: do NOT silently drop them
-         and do NOT attempt to return them to the upstream agent (no callback
-         path exists in the pipeline). Instead, set status="rejected" and
-         rejection_reason="missing_location" on the finding, and exclude it
-         from `deduplicated_findings`. It will appear only in the stats.
-       - EXCEPTION: findings with source="threat_model" and
-         location.file="architecture" and location.line_start=0 are valid
-         architecture-level findings. Do NOT reject them — they represent
-         system-level risks (centralization, timelock, governance) that have
-         no specific line number. Accept them as-is.
-       - Findings with source="manual_review" and confidence < 0.3 — lower
-         severity by one level. The confidence field is only emitted by the
-         security_auditor agent. For findings from other sources (code_quality,
-         static_analysis, threat_model) where confidence is absent, treat the
-         field as absent — do NOT downgrade based on a missing field.
-         NOTE: SA findings do carry a confidence value (mapped from Slither:
-         high=0.9, medium=0.6, low=0.3), but this reflects detector trigger
-         reliability, not exploitability certainty. Do NOT apply severity
-         downgrading to SA findings based on their confidence value — it is
-         informational only and must not drive severity changes.
-       - Recommendation correctness: for each finding, verify the
-         recommendation is technically valid for the Solidity version and EVM
-         context of the audited contract. Drop any finding whose
-         recommendation contradicts how the language or EVM actually works —
-         do not attempt to correct it, just drop it.
-       REENTRANCY FALSE POSITIVE RULE: If a MAN finding for function F
-         explicitly confirms that F follows CEI (all state writes precede the
-         external call), AND an SA finding for the same function F carries a
-         reentrancy detector result, the SA finding is a false positive.
-         Downgrade it to Informational and replace its description with:
-         "The function currently follows CEI. Consider adding a nonReentrant
-         modifier as an additional safety measure."
-         Do NOT retain the SA reentrancy finding at High or Medium.
+       c. REENTRANCY-FP FILTER:
+          If a MAN finding for function F explicitly confirms F follows CEI
+          (all state writes precede the external call), AND an SA finding for
+          the same function F carries a reentrancy detector result:
+          The SA finding is a false positive. Downgrade to Informational and
+          replace description with: "The function currently follows CEI.
+          Consider adding a nonReentrant modifier as a defense-in-depth measure."
+          Do NOT retain the SA reentrancy finding at High or Medium.
 
-       REENTRANCY-CEI-ONLY GATE: Applies when a MAN (manual_review) reentrancy
-         finding cites ONLY a CEI pattern violation — no Tier 2 read-only
-         stale-value path and no Tier 3 cross-contract stale-state path was
-         identified in the finding description.
-         This gate does NOT apply if:
-           - A specific Tier 3 cross-contract exploit path is described (that
-             analysis stands and the gate is skipped entirely for this finding).
-           - The token is identified as ERC777, has a custom send/receive hook,
-             or the contract implements a flash loan callback interface.
-           - The finding originates from static_analysis (SA findings are
-             handled by the REENTRANCY-FP rule above, not this gate).
-           - The token interface is ambiguous or not stated in the finding
-             description (skip sub-rule 2 below; do not assume SafeERC20).
-         In all excluded cases, the finding passes through this gate unchanged
-         and is evaluated solely by the CRITICAL-GATE in step 4.
-         When the gate applies, evaluate in order:
-           1. If the flagged function has a `nonReentrant` modifier:
-              downgrade to Informational. The CEI violation is a defense-in-depth
-              concern only — the guard already blocks re-entry. Replace description
-              with: "CEI ordering violation with nonReentrant guard present.
-              The guard fully prevents Tier 1 re-entry; this is a defense-in-depth
-              observation only."
-           2. If no `nonReentrant` AND the finding explicitly states the only
-              token interface used is standard ERC20 via SafeERC20
-              (transferFrom / transfer, no hooks, no callbacks):
-              cap severity at High; do not allow Critical.
-              Rationale: exploiting a Tier 1 CEI violation requires a re-entrant
-              callback. Standard SafeERC20 transfer/transferFrom provides no
-              callback path — the exploit is only reachable if a hookable token
-              (ERC777 or custom) is substituted. Add to description:
-              "No callback path exists via standard SafeERC20. Critical severity
-              requires an unconditional exploit path; the precondition of a
-              hookable token caps this at High."
-
-    4. CRITICAL SEVERITY GATE:
-       Before emitting any finding with severity=Critical, answer all three:
-       a. Direct fund-loss path exists (concrete, not hypothetical)?
-       b. No special preconditions (e.g., not "only if owner is malicious")?
-       c. Exploit flow can be described in one sentence?
-       If any answer is NO → downgrade to High or Medium.
-       Findings about naming, constants, or documentation are NEVER Critical.
-
-       CODE DEFECT vs ADMIN MALICE — mandatory gate before applying MANDATORY DOWNGRADE RULE:
-       Before applying the downgrade, answer: "Can a well-intentioned admin, following
-       normal documented usage, trigger this harm?"
-         - YES → this is a CODE DEFECT, not an admin-malice scenario. Do NOT apply the
-           downgrade. The severity reflects the defect, not the admin's intent.
-         - NO (harm requires the admin to consciously choose an abusive action) → apply
-           the downgrade.
-       Example that must NOT be downgraded: a termination/revocation function (e.g. cancel,
-       revoke, slash) that silently destroys earned-but-unclaimed tokens. A non-malicious
-       admin calling the function as documented inevitably causes fund loss — there is no
-       opt-out path. This is HIGH, not Medium.
-       Example that MUST be downgraded: "Admin can call a privileged setter to 100% fee."
-       No standard usage path reaches this; it requires deliberate abuse.
-
-       MANDATORY DOWNGRADE RULE — Centralization / admin privilege risk:
-       If the only way a finding can be exploited is for the owner/admin to
-       act maliciously (e.g. "owner can rug", "admin can drain", "no timelock"),
-       the maximum severity is MEDIUM. Rationale: condition (b) above is NO
-       because "malicious insider" is a precondition, not a zero-trust exploit.
-       Examples that MUST be Medium (not High or Critical):
-         - "Owner can change fee to 100% with no timelock"
-         - "Admin can call setRewardRate(0) to stop rewards"
-         - "Centralization risk: contract owner has unlimited privileges"
-         - "No multisig on privileged role"
-
-       MULTI-PRECONDITION SEVERITY CAP: If a finding's exploit requires two
-       or more independent external preconditions to hold simultaneously
-       (e.g. the token must be a non-standard type such as ERC777, AND a
-       privileged actor must behave maliciously), cap the severity at Medium.
-       Each additional required condition reduces realistic exploitability.
-       This cap applies on top of the MANDATORY DOWNGRADE RULE: a compound
-       precondition path is never High or Critical regardless of impact.
-
-    5. MATHEMATICAL VERIFICATION:
-       For findings with quantitative claims, verify the arithmetic explicitly.
-       Example: if fee constants sum to 1000 and divisor is 10000,
-       total fee = 10%, net = 90% — a finding claiming "net is zero" must be
-       removed. Include the inline calculation in the finding description.
-
-       ACCOUNTING INVARIANT GATE — before emitting a finding that "variable X
-       is not decremented / updated after a token transfer":
-         STEP 0 — FAST EXIT (check this first):
-         If the finding description does not explicitly name BOTH the variable X
-         AND the pool the transfer draws from, classify as INCONCLUSIVE and pass
-         the finding through unchanged. Do not attempt to infer pool identity
-         from variable names alone. Only proceed to steps (a)–(c) if both
-         pieces of information are explicitly stated in the finding description.
-
-         NOTE: you do NOT have access to raw contract source — do NOT attempt
-         to reason about pool identity from code you cannot see.
-
-         a. From the finding description, identify what asset pool X tracks.
-            Examples:
-              - `totalDeposited` → tracks all deposited user funds
-              - `totalBorrowed` → tracks outstanding loan principal
-              - `totalReserved` (or any vesting-liability counter) → tracks scheduled entitlements
-              - `reserveBalance` → tracks protocol-owned liquidity reserves
-         b. From the finding description, identify what asset pool the
-            described transfer draws FROM. Ask: "After this transfer, which
-            pool is smaller — the one X tracks, or a different pool?"
-            Examples of different pools:
-              - Admin withdraws the contract's non-reserved surplus above X
-              - Protocol fee is taken from a separate fee accumulator, not user deposits
-              - Liquidation bonus is paid from the collateral pool, not reserves
-         c. Decision:
-              SAME pool (transfer reduces the pool X tracks) → X must be
-              decremented. If it isn't, emit an accounting discrepancy finding.
-              DIFFERENT pool (transfer draws from a pool X does not track) →
-              X not being decremented is CORRECT. Drop the finding.
-              INCONCLUSIVE (cannot determine from the description alone) →
-              pass the finding through unchanged.
-         Illustrative example (vesting): X = a vesting-liability counter
-         (e.g. `totalReserved`). An admin-withdrawal function transfers only the
-         surplus (balance - X). The surplus pool is distinct from the liability
-         pool, so X correctly remains unchanged — do NOT flag this.
-         Illustrative example (AMM): X = reserve0 tracks token0 liquidity.
-         A swap transfers token0 OUT. reserve0 must be decremented — if it
-         isn't, the invariant k = reserve0 * reserve1 is stale → flag this.
-
-    6. UNUSED VARIABLE / DEAD CODE CLAIMS:
-       Before accepting any finding that states a state variable is "unused",
-       "never read", or "dead code", perform an explicit read-check:
-       - Search for every occurrence of the variable name across all functions.
-       - Classify each read site:
-           LOGICAL read: used in a conditional (`if`, `require`, `assert`),
-             arithmetic expression, return statement, or as an argument to
-             a non-event function call. A logical read means the variable
-             affects contract behavior — DROP the finding.
-           OBSERVATIONAL read: the variable appears only as an argument to
-             `emit SomeEvent(...)`. This does NOT affect control flow or state.
-             An event-only reference does NOT drop the finding.
-       - If the variable has at least one LOGICAL read site — drop the finding.
-       - If the only read sites are event `emit` arguments (or there are no
-         read sites at all), the finding is valid: emit it as Informational
-         with category="gas_optimization". Note the event location in the
-         description so developers can confirm the variable is observation-only.
-
-    7. Set needs_poc on each Finding object directly (boolean field on the finding).
-       Critical and High → needs_poc=true; all other severities → needs_poc=false.
-       Upstream agents do not emit this field; add it here during this step.
-       The report_writer reads needs_poc from each finding in deduplicated_findings
-       and omits the PoC section for any finding where needs_poc is false or absent.
-
-    8. FINAL ORDERING AND ID PRESERVATION:
-       Sort `deduplicated_findings` in descending severity order
-       (Critical → High → Medium → Low → Informational).
-       PRESERVE original source IDs exactly as assigned by each upstream
-       agent (e.g. QA-001, MAN-001, SA-001, TM-001).
-       Do NOT renumber findings to F-001, F-002, etc. The original IDs
-       are the canonical cross-reference identifiers used by the report writer.
+    3. OUTPUT PREPARATION:
+       Produce the deduplicated list. Do NOT assign needs_poc here — that is
+       the calibration task's job. Preserve all source IDs exactly.
 
   expected_output: >
     {
-      "deduplicated_findings": [ /* sorted Finding array */ ],
-      "stats": {
+      "deduplicated_findings": [ /* Finding array, severity order preserved from sources */ ],
+      "stats_partial": {
         "total_before": N,
         "duplicates_removed": N,
         "rejected": N,
-        "by_severity": {"Critical": N, "High": N, "Medium": N, "Low": N, "Informational": N},
-        "coverage_gaps": [],  /* list of missing vector IDs, e.g. ["V04", "V09"]; [] if complete */
-        "etherscan_status": "success|not_available|error",  /* copied from threat_modeling output */
+        "coverage_gaps": [],
+        "etherscan_status": "success|not_available|error",
         "informational_dedup_confirmed": true
       },
-      /* needs_poc is a boolean field on each Finding in deduplicated_findings */
+      "contract_pragma": "^0.8.17"
     }
 
     ID prefixes by source:
@@ -1072,6 +658,9 @@ peer_review_task:
       TM-xxx  → threat_modeler
       PR-xxx  → peer_reviewer (coverage-gap findings only)
 
+    Emit the scratchpad (between === SCRATCHPAD START === and === SCRATCHPAD END ===
+    markers), then the final JSON object inside a ```json ... ``` fence. No other prose.
+
   agent: peer_reviewer
   context:
     - code_quality_review_task
@@ -1079,9 +668,249 @@ peer_review_task:
     - security_audit_task
     - threat_modeling_task
 
+severity_calibration_task:
+  description: >
+    Apply all severity gates to the deduplicated finding list.
+    Produce the final calibrated finding list with needs_poc set.
+
+    You receive from dedup_task:
+    - deduplicated_findings: the clean, merged finding list
+    - stats_partial: coverage gaps, counts, etherscan_status
+    - contract_pragma: the Solidity pragma of the audited contracts
+
+    EXECUTION PROTOCOL — write your scratchpad between
+    === SCRATCHPAD START === and === SCRATCHPAD END === markers.
+    The scratchpad is required. After it, output JSON inside a ```json ... ``` fence.
+
+    Inside the scratchpad, complete PHASE 4 only:
+    PHASE 4 — GATE CHECKLIST
+      Note: record gate: NO-CHANGE for findings that pass all gates unchanged.
+      For each surviving finding, record one line per gate applied:
+      [ID] | severity_in → severity_out | gate: <gate name> | reason: <one phrase>
+
+      Gate names:
+        NORMALIZATION       (step 2)  — severity scale enforcement / unbounded-array floor
+        REENTRANCY-CEI-ONLY (step 3a) — CEI-only reentrancy capped or downgraded
+        NEG-CLAIM           (step 3b) — negative assertion without quoted evidence, severity reduced
+        CONFIDENCE          (step 3c) — manual_review confidence < 0.3, severity reduced one level
+        REC-VALIDITY        (step 3d) — recommendation technically invalid, finding dropped
+        NON-UPGRADE-FP      (step 3e) — non-upgradeability flagged as vulnerability, downgraded
+        CRITICAL-GATE       (step 4)  — critical criteria not all met, downgraded
+        CRITICAL-MATH-PROOF (step 4)  — critical quantitative claim lacks inline arithmetic proof
+        CODE-DEFECT         (step 4)  — admin harm triggerable by normal usage, no downgrade applied
+        DOWNGRADE           (step 4)  — admin malice required, severity capped at Medium
+        MULTI-PRECONDITION  (step 4)  — two+ independent preconditions, severity capped at Medium
+        MATH-CHECK          (step 5)  — quantitative claim arithmetic verified or corrected
+        ACCOUNTING-GATE     (step 5)  — variable non-decrement analysed (same/different pool)
+        UNUSED-VAR          (step 6)  — dead code claim verified against logical reads
+        NO-CHANGE                     — finding passed all gates without modification
+
+      Every surviving finding must have at least one line.
+      Multiple gates on one finding: one line per gate, in application order.
+
+    Steps:
+
+    1. READ INPUT:
+       From dedup_task context, extract:
+       - deduplicated_findings: the finding list to calibrate
+       - stats_partial.duplicates_removed, stats_partial.rejected,
+         stats_partial.coverage_gaps, stats_partial.etherscan_status,
+         stats_partial.informational_dedup_confirmed
+       - contract_pragma: the Solidity version string (used in step 3d)
+       Copy all stats_partial values directly into your output stats object.
+       Set stats.gates_applied to the count of gate applications that changed a severity.
+
+    2. SEVERITY NORMALIZATION:
+       Critical: direct loss of funds, no preconditions
+       High: loss of funds under realistic conditions
+       Medium: logic bugs, no direct financial loss
+       Low: best practice violations, minor risks
+       Info: observations
+
+       QA SEVERITY CEILING (MANDATORY):
+       Findings with source="code_quality" have a MAXIMUM severity of Low.
+       Missing NatSpec, redundant imports, commented-out code, magic numbers,
+       naming issues, and style observations are NEVER Medium or above.
+       The ONLY exception: if a code_quality finding independently satisfies
+       a genuine exploitable vulnerability criterion under its own evidence
+       (specific line numbers demonstrating exploitability) — reclassify it
+       as source="manual_review", set reclassified=true on the finding object,
+       include that evidence quoted in the description, and apply normal gates.
+       In all other cases: hard cap at Low.
+
+       SA SEVERITY FLOOR (MANDATORY):
+       Findings with source="static_analysis" may not be downgraded more than
+       ONE level below their Slither-reported severity without an inline
+       arithmetic proof showing the impact is negligible under realistic inputs.
+       A divide-before-multiply finding in a token amount path is a financial
+       precision loss — it defaults to High and requires arithmetic proof of
+       negligible impact to downgrade below High.
+       The NEG-CLAIM gate and the CONFIDENCE gate do NOT apply to SA findings:
+       SA findings are tool-verified; there is no "negative assertion" to confirm,
+       and SA confidence values reflect detector reliability, not exploitability.
+
+       MANDATORY — UNBOUNDED ARRAY IN VIEW FUNCTION:
+       If any finding describes an unbounded storage array iterated inside an
+       external or public view function with no on-chain pagination and no hard
+       size cap — minimum severity is MEDIUM. Override any upstream Low/Info rating.
+       Confirm: (a) array grows on every record creation with no pruning path,
+       (b) read by a view getter external callers use,
+       (c) no on-chain pagination or hard size cap.
+
+    3. VALIDATION GATES (apply in this order to each finding):
+
+       a. REENTRANCY-CEI-ONLY GATE:
+          Applies when a MAN reentrancy finding cites ONLY a CEI pattern violation
+          (no Tier 2 read-only path, no Tier 3 cross-contract path identified).
+          Does NOT apply if: a Tier 3 cross-contract exploit path is described,
+          the token is ERC777 or has custom hooks, the contract implements flash
+          loan callbacks, or the token interface is ambiguous/unstated.
+          In all excluded cases: finding passes this gate unchanged.
+          When the gate applies, evaluate in order:
+            1. If flagged function has `nonReentrant`: downgrade to Informational.
+               Replace description with: "CEI ordering violation with nonReentrant
+               guard present. Guard fully prevents Tier 1 re-entry; defense-in-depth
+               observation only."
+            2. If no `nonReentrant` AND finding explicitly states the only token
+               interface is standard ERC20 via SafeERC20 (no hooks, no callbacks):
+               cap severity at High; do not allow Critical. Add to description:
+               "No callback path via standard SafeERC20. Critical requires an
+               unconditional exploit path; hookable token precondition caps at High."
+
+       b. NEG-CLAIM GATE (applies ONLY to source="manual_review" findings):
+          For any MAN finding whose description contains: "does not check",
+          "does not validate", "fails to verify", "missing guard", "no restriction on",
+          or "missing check for" — confirm the finding includes quoted evidence that
+          the upstream agent inspected the cited function body (specific line numbers
+          or function body content confirming absence).
+          If no such evidence is present:
+            - Reduce severity by one level (Critical→High, High→Medium, Medium→Low).
+            - Add: "(NEG-CLAIM: negative assertion not confirmed with quoted function
+              body — severity reduced one level.)"
+          Note: this gate does NOT apply to QA or SA findings. QA findings are
+          pattern observations; SA findings are tool-verified results.
+
+       c. CONFIDENCE DOWNGRADE (applies ONLY to source="manual_review" findings):
+          If confidence < 0.3: lower severity by one level.
+          SA confidence values (0.3/0.6/0.9) reflect detector reliability, not
+          exploitability. Do NOT downgrade SA findings based on confidence.
+
+       d. RECOMMENDATION VALIDITY:
+          For each finding, verify the recommendation is technically valid for
+          the Solidity version and EVM context of the audited contract
+          (use contract_pragma from dedup_task output).
+          Drop any finding whose recommendation contradicts how the language or
+          EVM actually works — do not attempt to fix it, just drop it.
+
+       e. NON-UPGRADEABILITY FALSE POSITIVE:
+          If any finding from source="threat_model" describes the absence of an
+          upgrade mechanism as a vulnerability (no proxy, immutable contract, no
+          admin upgrade path) and rates it Medium or above:
+          Downgrade to Informational unless the finding explicitly identifies a
+          confirmed bug that immutability prevents from being fixed.
+          Immutability is a deliberate design choice, not a finding.
+
+    4. CRITICAL SEVERITY GATE:
+       Before accepting any finding with severity=Critical, verify ALL THREE:
+       a. Direct fund-loss path exists (concrete, not hypothetical)?
+       b. No special preconditions (not "only if owner is malicious")?
+       c. Exploit flow describable in one sentence?
+       If any answer is NO → downgrade to High or Medium.
+       Findings about naming, constants, or documentation are NEVER Critical.
+
+       CRITICAL-MATH-PROOF GATE: If the Critical finding's exploit depends on a
+       quantitative threshold (e.g. "overflow occurs when value exceeds N",
+       "precision loss accumulates to Y tokens") — the finding description MUST
+       include explicit step-by-step arithmetic demonstrating the threshold is
+       reachable under realistic token amounts, decimal counts, and time windows.
+       If the calculation is absent → downgrade to High pending arithmetic proof.
+       Record as: gate: CRITICAL-MATH-PROOF | reason: quantitative claim without inline proof.
+       Note: for High and Medium quantitative claims, arithmetic verification is
+       handled by step 5 MATH-CHECK below.
+
+       CODE DEFECT vs ADMIN MALICE — mandatory before applying DOWNGRADE:
+       Answer: "Can a well-intentioned admin, following normal documented usage,
+       trigger this harm?"
+         - YES → CODE DEFECT. Do NOT downgrade. Severity reflects the defect.
+         - NO (harm requires consciously abusive action) → apply DOWNGRADE.
+
+       MANDATORY DOWNGRADE RULE — Centralization / admin privilege risk:
+       If the only exploitation path requires the owner/admin to act maliciously:
+       maximum severity is MEDIUM. "Malicious insider" is a precondition.
+       Examples that MUST be Medium: "Owner can change fee to 100% with no timelock",
+       "Admin can call setRewardRate(0) to stop rewards", "No multisig on privileged role."
+
+       MULTI-PRECONDITION SEVERITY CAP:
+       If exploit requires two or more independent external preconditions simultaneously
+       (e.g. non-standard token type AND privileged actor malice): cap at Medium.
+       This applies on top of DOWNGRADE — compound precondition path is never High or Critical.
+
+    5. MATHEMATICAL VERIFICATION:
+       For findings with quantitative claims, verify the arithmetic explicitly.
+       Example: if fee constants sum to 1000 and divisor is 10000,
+       total fee = 10%, net = 90% — a finding claiming "net is zero" must be removed.
+       Include the inline calculation in the finding description.
+
+       ACCOUNTING INVARIANT GATE — before accepting a finding that "variable X
+       is not decremented after a token transfer":
+         STEP 0 — FAST EXIT:
+         If the description does not explicitly name BOTH variable X AND the pool
+         the transfer draws from: classify as INCONCLUSIVE and pass through unchanged.
+         Do not infer pool identity from variable names alone.
+         NOTE: you do NOT have access to raw contract source.
+         a. From the description, identify what pool X tracks.
+         b. Identify what pool the transfer draws FROM.
+         c. SAME pool → X must be decremented; if not, emit accounting finding.
+            DIFFERENT pool → X not being decremented is CORRECT. Drop the finding.
+            INCONCLUSIVE → pass through unchanged.
+
+    6. UNUSED VARIABLE / DEAD CODE CLAIMS:
+       Before accepting a finding that a state variable is "unused" or "dead code":
+       - Classify every read site:
+           LOGICAL read (in conditional, arithmetic, return, non-event call) →
+           variable affects behavior → DROP the finding.
+           OBSERVATIONAL read (only in emit SomeEvent(...)) → does not affect behavior.
+       - If any LOGICAL read exists: drop the finding.
+       - If only observational reads or none: valid finding; emit as Informational,
+         category="gas_optimization". Note the event location.
+
+    7. SET needs_poc:
+       Critical and High → needs_poc=true.
+       All other severities → needs_poc=false.
+       Add this boolean field directly to each Finding object.
+       The report_writer omits the PoC section when needs_poc=false or absent.
+
+    8. FINAL ORDERING:
+       Sort calibrated_findings in descending severity order:
+       Critical → High → Medium → Low → Informational.
+       PRESERVE all original source IDs (QA-xxx, MAN-xxx, SA-xxx, TM-xxx, PR-xxx).
+       Do NOT renumber to F-001, F-002, etc.
+
+  expected_output: >
+    {
+      "calibrated_findings": [ /* sorted Finding array with needs_poc on each */ ],
+      "stats": {
+        "total_before": N,
+        "duplicates_removed": N,
+        "rejected": N,
+        "gates_applied": N,
+        "by_severity": {"Critical": N, "High": N, "Medium": N, "Low": N, "Informational": N},
+        "coverage_gaps": [],
+        "etherscan_status": "success|not_available|error",
+        "informational_dedup_confirmed": true
+      }
+    }
+
+    Emit the scratchpad (between === SCRATCHPAD START === and === SCRATCHPAD END ===
+    markers), then the final JSON object inside a ```json ... ``` fence. No other prose.
+
+  agent: severity_calibrator
+  context:
+    - dedup_task
+
 report_writing_task:
   description: >
-    Write the final audit report in two formats.
+    Write the final audit report.
 
     Project: {project_name}
     Date: {audit_date}
@@ -1089,16 +918,12 @@ report_writing_task:
     Audited files:
     {audit_scope}
 
-    Use findings from peer_review_task.
+    Use findings from severity_calibration_task.
+    The canonical finding list is in `calibrated_findings` (not `deduplicated_findings`).
 
-    ID CONSISTENCY REQUIREMENT: When rendering the Findings Summary table and
-    the Detailed Findings section, use the canonical IDs provided by
-    `peer_review_task`'s `deduplicated_findings[].id` verbatim (e.g. "MAN-003",
-    "QA-001"). Do NOT invent local temporary IDs (e.g. "F-001") for the
-    same finding. If you need to produce secondary numbering for presentation
-    (e.g. sequential display numbers), include the canonical ID in the
-    heading: "[MAN-003] 1. Integer Overflow...". The canonical ID is the
-    single source of truth for cross-references in the report and JSON outputs.
+    ID CONSISTENCY REQUIREMENT: use canonical IDs from calibrated_findings[].id verbatim.
+    Do NOT invent local temporary IDs (e.g. "F-001"). If secondary numbering is needed,
+    include the canonical ID in the heading: "[MAN-003] 1. Integer Overflow...".
 
     ## Markdown report structure:
 
@@ -1126,24 +951,27 @@ report_writing_task:
     ## Scope
     A table listing the audited files. Use ONLY the data from "Audited files" above.
     Columns: File | Lines | Notes
-    CRITICAL: The "Lines" value for each file MUST be copied EXACTLY and verbatim
-    from the "(N lines)" figure in the "Audited files" input above.
-    Do NOT recalculate, estimate, infer, or use any other source for line counts.
-    "Notes" = one short phrase describing the contract's purpose (e.g. "Main staking logic").
+    CRITICAL: "Lines" must be copied EXACTLY from the "(N lines)" figure in the input.
+    "Notes" = one short phrase describing the contract's purpose.
     Do NOT put findings or JSON data in this table.
 
     ## Methodology
-    (brief description: this audit was conducted by an AI-based multi-agent system (SCAuditCrew).
-    The pipeline includes automated static analysis via Slither, AI-driven manual code review,
-    threat modelling, and peer review for deduplication and severity normalisation.
-    Only mention tools that are part of this pipeline: Slither and the SCAuditCrew
-    AI multi-agent system. Do not mention other tools or human auditors.)
+    This audit was conducted by an AI-based multi-agent system (SCAuditCrew).
+    The pipeline includes automated static analysis via Slither, AI-driven manual
+    code review with per-vector procedure files, threat modelling, semantic
+    deduplication, and severity calibration. Only mention tools that are part
+    of this pipeline: Slither and the SCAuditCrew AI multi-agent system. Do not
+    mention other tools or human auditors.
+    If the static analysis output shows tool_status.slither is "not_installed",
+    state that static analysis was attempted but the Slither tool was unavailable
+    for this audit run, and omit any claim that Slither results were obtained.
 
     ## Findings Summary
     | ID | Title | Severity |
-    (table of all findings; use severity icons in the Severity column:
-    🔴 Critical · 🟠 High · 🟡 Medium · 🔵 Low · ⚪ Informational —
-    omit the `Status` column)
+    Use severity icons: 🔴 Critical · 🟠 High · 🟡 Medium · 🔵 Low · ⚪ Informational
+    If calibrated_findings is empty, write "No findings were identified" in this
+    section, set the deployment verdict to LOW RISK, and omit the Detailed Findings
+    section entirely.
 
     ## Detailed Findings
     For each finding:
@@ -1152,8 +980,9 @@ report_writing_task:
     **Description:** ...
     **Impact:** ...
     *(Only for findings where needs_poc=true — insert a **Proof of Concept:** section
-    here with a minimal concrete exploit scenario or interaction sequence that
-    demonstrates the issue. Omit this section entirely when needs_poc=false.)*
+    with a minimal concrete exploit scenario constructed directly from the description
+    and impact fields of the finding. Do not invent exploit steps not implied by
+    those fields. Omit entirely when needs_poc=false.)*
     **Recommendation:** ...
 
     ## General Recommendations
@@ -1164,4 +993,4 @@ report_writing_task:
 
   agent: report_writer
   context:
-    - peer_review_task
+    - severity_calibration_task
