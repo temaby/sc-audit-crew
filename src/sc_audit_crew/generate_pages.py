@@ -637,14 +637,31 @@ def _extract_json_block(text: str) -> str:
 
 
 def parse_peer_review(output_dir: Path) -> tuple[list[dict], dict] | None:
-    """Parse 05_peer_review.md → (findings, stats). Returns None on failure."""
-    path = output_dir / "05_peer_review.md"
-    if not path.exists():
+    """Parse calibration/dedup output → (findings, stats). Returns None on failure.
+
+    Tries files in preference order:
+      1. 06_severity_calibration.md  (calibrated_findings)
+      2. 05_dedup.md                 (deduplicated_findings)
+      3. 05_peer_review.md           (deduplicated_findings, backward compat)
+    """
+    candidates = [
+        (output_dir / "06_severity_calibration.md", "calibrated_findings"),
+        (output_dir / "05_dedup.md", "deduplicated_findings"),
+        (output_dir / "05_peer_review.md", "deduplicated_findings"),
+    ]
+    path = None
+    findings_key = "deduplicated_findings"
+    for candidate, key in candidates:
+        if candidate.exists():
+            path = candidate
+            findings_key = key
+            break
+    if path is None:
         return None
     try:
         raw = _extract_json_block(path.read_text(encoding="utf-8"))
         data = json.loads(raw)
-        findings_raw: list[dict] = data.get("deduplicated_findings", [])
+        findings_raw: list[dict] = data.get(findings_key, [])
         # Filter out stub duplicate references (only have id + duplicate_of)
         findings = [
             f for f in findings_raw
@@ -718,7 +735,8 @@ def load_audit(output_dir: Path) -> tuple[list[dict], dict, dict]:
     """
     Load audit data from output directory.
     Returns (findings, stats, report_sections).
-    Prefers 05_peer_review.md; falls back to findings.json.
+    Prefers 06_severity_calibration.md, then 05_dedup.md, then 05_peer_review.md,
+    then findings.json as a last-resort fallback.
     """
     result = parse_peer_review(output_dir)
     from_peer_review = True
