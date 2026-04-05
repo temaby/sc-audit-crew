@@ -218,6 +218,61 @@ def _generate_skeleton(source: str) -> str:
     return "\n".join(result)
 
 
+# ------------------------------------------------------------------
+# Python-side quick-skip pre-filter for VectorReadTool bottleneck
+# ------------------------------------------------------------------
+
+# Patterns mirror the QUICK SKIP CONDITIONS in tasks.yaml (security_audit_task).
+# Conservative: match the narrow identifiers only; do not attempt semantic analysis.
+_V03_ORACLE_RE = re.compile(r"latestRoundData|getPrice|\.slot0\b|\.observe\b")
+_V05_FLASHLOAN_RE = re.compile(r"flashLoan|flashBorrow|executeFlashLoan")
+_V06_PROXY_RE = re.compile(
+    r"delegatecall|upgradeTo\b|UUPSUpgradeable|TransparentUpgradeableProxy"
+)
+_V09_SIG_RE = re.compile(r"ecrecover|ECDSA\.recover|_useNonce\b|\bpermit\b")
+_V17_INIT_RE = re.compile(
+    r"initialize\s*\(|upgradeTo\b|BeaconProxy|TransparentUpgradeableProxy|UUPSUpgradeable"
+)
+
+_PLACEHOLDER_SPECS = frozenset({
+    "", "n/a", "tbd", "not provided", "no specification provided.",
+    "none specified.", "none",
+})
+
+
+def _compute_pre_skipped_vectors(contracts_full_source: str, specification: str) -> str:
+    """Return a comma-separated string of vector IDs that can be safely skipped.
+
+    Checks are conservative — a vector is only pre-skipped when its identifying
+    pattern is definitively absent from the source.  Mirrors the QUICK SKIP
+    CONDITIONS declared in tasks.yaml so the agent and Python agree on the same
+    criteria.
+    """
+    skipped: list[str] = []
+
+    if not _V03_ORACLE_RE.search(contracts_full_source):
+        skipped.append("V03")
+
+    if not _V05_FLASHLOAN_RE.search(contracts_full_source):
+        skipped.append("V05")
+
+    if not _V06_PROXY_RE.search(contracts_full_source):
+        skipped.append("V06")
+
+    if not _V09_SIG_RE.search(contracts_full_source):
+        skipped.append("V09")
+
+    if not _V17_INIT_RE.search(contracts_full_source):
+        skipped.append("V17")
+
+    # V19 — skip if spec is absent, a placeholder, or fewer than 50 words
+    spec_lower = specification.strip().lower()
+    if spec_lower in _PLACEHOLDER_SPECS or len(specification.split()) < 50:
+        skipped.append("V19")
+
+    return ", ".join(skipped) if skipped else "None"
+
+
 # Context budget thresholds (approximate tokens: 1 token ≈ 4 chars for Solidity/English)
 _CONTEXT_WARN_TOKENS = 60_000
 _CONTEXT_ERROR_TOKENS = 120_000
@@ -319,6 +374,9 @@ def build_inputs(ctx: AuditContext, project_root: str, slither_target: str | Non
 
     _validate_context_budget(contracts_full_source)
 
+    specification = ctx.specification or "No specification provided."
+    pre_skipped = _compute_pre_skipped_vectors(contracts_full_source, specification)
+
     return {
         "project_name": ctx.project_name,
         "protocol_type": ctx.protocol_type or "Unknown",
@@ -330,12 +388,14 @@ def build_inputs(ctx: AuditContext, project_root: str, slither_target: str | Non
         "project_root": project_root,
         "slither_target": slither_target or project_root,
         "contract_names": [Path(c.filename).stem.split(".")[0] for c in ctx.contracts],
-        "specification": ctx.specification or "No specification provided.",
+        "specification": specification,
         "known_risks": ctx.known_risks or "None specified.",
         "test_code": ctx.test_code or "No test files provided.",
         "documentation": ctx.documentation or "No documentation provided.",
         "deployed_address": "None",
         "audit_date": datetime.now().strftime("%Y-%m-%d"),
+        "static_analysis_raw": "",  # populated by main pipeline before kickoff
+        "pre_skipped_vectors": pre_skipped,
     }
 
 
@@ -484,7 +544,17 @@ def run():
         help="Use LLM_FAST for all agents (cheaper, quicker, lower quality). "
              "Intended for live demos. Not recommended for production audits.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose agent output: prints every agent thought, tool call, "
+             "and observation. Also activates guardrail progress logs showing "
+             "which vectors have been received after each retry.",
+    )
     args = parser.parse_args()
+
+    if args.verbose:
+        os.environ["VERBOSE"] = "1"
 
     _check_api_keys(args)
 
@@ -511,7 +581,12 @@ def run():
             flat_path = autodiscover_flat(project_root)
             slither_target = str(flat_path.resolve()) if flat_path else project_root
 
-        output_dir = make_output_dir(args.output, args.name)
+        if args.resume_dir:
+            output_dir = Path(args.resume_dir)
+            if not output_dir.exists():
+                raise FileNotFoundError(f"--resume-dir not found: {output_dir}")
+        else:
+            output_dir = make_output_dir(args.output, args.name)
 
         print(f"\n{'='*60}")
         print(f"  Re-running step: static-analysis")
@@ -553,13 +628,16 @@ def run():
             )
 
         if args.only_step == "report":
-            peer_review_path = output_dir / "05_peer_review.md"
-            if not peer_review_path.exists():
+            # Prefer 06_severity_calibration.md; fall back if running against old output dirs
+            calibration_path = output_dir / "06_severity_calibration.md"
+            if not calibration_path.exists():
+                calibration_path = output_dir / "05_peer_review.md"
+            if not calibration_path.exists():
                 raise FileNotFoundError(
-                    f"05_peer_review.md not found in {output_dir}. "
+                    f"06_severity_calibration.md (or 05_peer_review.md) not found in {output_dir}. "
                     "Run the full audit first or point --resume-dir at a valid output folder."
                 )
-            peer_review_content = peer_review_path.read_text(encoding="utf-8")
+            calibration_content = calibration_path.read_text(encoding="utf-8")
 
             # Reconstruct minimal scope from existing output files
             existing_files = sorted(output_dir.glob("*.md"))
@@ -568,11 +646,11 @@ def run():
             print(f"\n{'='*60}")
             print(f"  Re-running step: report")
             print(f"  Output dir     : {output_dir}")
-            print(f"  Peer review    : {peer_review_path.name} ({len(peer_review_content)} chars)")
+            print(f"  Source file    : {calibration_path.name} ({len(calibration_content)} chars)")
             print(f"{'='*60}\n")
 
             SmartContractAuditCrew(output_dir=output_dir).run_report_only(
-                peer_review_content=peer_review_content,
+                calibration_content=calibration_content,
                 project_name=args.name,
                 audit_date=datetime.now().strftime("%Y-%m-%d"),
                 audit_scope=audit_scope,
@@ -659,7 +737,30 @@ def run():
 
     inputs = build_inputs(ctx, project_root, slither_target=slither_target)
 
+    pre_skipped = inputs["pre_skipped_vectors"]
+    if pre_skipped != "None":
+        print(f"  Pre-skipped vectors: {pre_skipped} (static analysis — no LLM needed)")
+
     audit_crew = SmartContractAuditCrew(output_dir=output_dir, fast_mode=args.fast_mode)
+
+    # Run static analysis deterministically (no LLM) before the crew starts.
+    # This avoids path-hallucination failures and writes 02_static_analysis.md.
+    print("  Running static analysis (Slither, no LLM)...")
+    contract_names = inputs.get("contract_names", [])
+    try:
+        audit_crew.run_static_analysis_only(
+            project_root=str(slither_target),
+            contract_names=list(contract_names) if contract_names else None,
+        )
+    except Exception as sa_exc:
+        print(f"  [static analysis] unexpected error: {sa_exc}")
+        import json as _json
+        fallback = _json.dumps({"tool_status": {"slither": "error"}, "findings": [], "hint": str(sa_exc)})
+        (output_dir / "02_static_analysis_raw.md").write_text(fallback, encoding="utf-8")
+    sa_path = output_dir / "02_static_analysis_raw.md"
+    inputs["static_analysis_raw"] = sa_path.read_text(encoding="utf-8") if sa_path.exists() else \
+        '{"tool_status": {"slither": "error"}, "findings": []}'
+
     crew_obj = audit_crew.crew()
     try:
         crew_obj.kickoff(inputs=inputs)

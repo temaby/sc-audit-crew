@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 import urllib.request
@@ -25,12 +26,28 @@ from pydantic import BaseModel, Field
 # Helpers
 # ------------------------------------------------------------------
 
+def _venv_bin(name: str) -> str:
+    """Return the full path to a binary installed in the same venv as this interpreter.
+
+    Falls back to the bare name (relies on PATH) if the venv-local copy is not found.
+    This ensures tools like slither and solc-select work even when the venv is not
+    activated in the calling shell's environment.
+    """
+    scripts_dir = Path(sys.executable).parent
+    for candidate_name in (f"{name}.exe", name):
+        candidate = scripts_dir / candidate_name
+        if candidate.exists():
+            return str(candidate)
+    return name  # fallback
+
+
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[str, str, int]:
     """Run a subprocess; returns (stdout, stderr, returncode)."""
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,  # prevent interactive prompts (e.g. solc-select on Windows CI)
         cwd=cwd,
         timeout=timeout,
     )
@@ -45,19 +62,47 @@ def _detect_solc_version(source: str) -> str | None:
     return max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
 
 
-def _setup_solc(version: str) -> None:
-    """Install (if needed) and activate a specific solc version via solc-select (best-effort)."""
+def _setup_solc(version: str) -> str | None:
+    """Install (if needed) and activate a specific solc version via solc-select.
+
+    Returns the absolute path to the solc binary for that version so callers
+    can pass it via --solc, avoiding PATH lookup failures in subprocesses.
+    Returns None if solc-select is unavailable or the binary cannot be located.
+    """
     try:
-        stdout, _, code = _run(["solc-select", "versions"], timeout=10)
+        _ss = _venv_bin("solc-select")
+        stdout, _, code = _run([_ss, "versions"], timeout=10)
         if version not in stdout:
             print(f"  [slither] installing solc {version}...")
-            _run(["solc-select", "install", version], timeout=120)
-        _run(["solc-select", "use", version], timeout=10)
+            _run([_ss, "install", version], timeout=120)
+        _run([_ss, "use", version], timeout=10)
         print(f"  [slither] solc {version} active")
+        # Locate the actual solc binary: solc-select stores it at
+        # ~/.solc-select/artifacts/solc-{version}/solc-{version}[.exe]
+        artifacts_dir = Path.home() / ".solc-select" / "artifacts" / f"solc-{version}"
+        for cname in (f"solc-{version}.exe", f"solc-{version}"):
+            candidate = artifacts_dir / cname
+            if candidate.exists():
+                print(f"  [slither] solc binary: {candidate}")
+                return str(candidate)
+        print(f"  [slither] WARNING: solc binary not found under {artifacts_dir}")
     except FileNotFoundError:
         print("  [slither] solc-select not found, skipping version management")
     except Exception as e:
         print(f"  [slither] solc-select error: {e}")
+    return None
+
+
+def _find_foundry_root(start: Path) -> Path | None:
+    """Walk upward from start until a directory containing foundry.toml is found."""
+    current = start if start.is_dir() else start.parent
+    while True:
+        if (current / "foundry.toml").exists():
+            return current
+        parent = current.parent
+        if parent == current:  # filesystem root
+            return None
+        current = parent
 
 
 def _try_flatten(sol_file: Path) -> Path | None:
@@ -66,10 +111,14 @@ def _try_flatten(sol_file: Path) -> Path | None:
     Returns path to a temporary flat file on success, None otherwise.
     Caller is responsible for deleting the temp file.
     """
+    # Use the Foundry project root as cwd so forge can locate foundry.toml even when
+    # the .sol file is in a deeply nested subdirectory (e.g. src/contracts/Token.sol).
+    foundry_root = _find_foundry_root(sol_file)
+    cwd = str(foundry_root) if foundry_root else str(sol_file.parent)
     try:
         stdout, stderr, code = _run(
             ["forge", "flatten", str(sol_file)],
-            cwd=str(sol_file.parent),
+            cwd=cwd,
             timeout=60,
         )
         if code == 0 and stdout.strip():
@@ -112,7 +161,9 @@ def _compute_offset_map(flat_path: Path, contract_names: list[str], original_dir
             continue
 
         orig_lines = orig_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        pattern = re.compile(rf"^\s*(abstract\s+)?contract\s+{re.escape(name)}\b")
+        pattern = re.compile(
+            rf"^\s*(abstract\s+)?(contract|library|interface)\s+{re.escape(name)}\b"
+        )
 
         orig_lineno = next(
             (i for i, line in enumerate(orig_lines, start=1) if pattern.match(line)), None
@@ -135,7 +186,15 @@ def _compute_offset_map(flat_path: Path, contract_names: list[str], original_dir
 
 class SlitherInput(BaseModel):
     target: str = Field(..., description="Path to .sol file, flat file, or project directory")
-    exclude_informational: bool = Field(True, description="Exclude informational findings")
+    exclude_informational: bool = Field(
+        True,
+        description=(
+            "Exclude Slither informational findings (dead-code, unused-return, etc.). "
+            "Default True: informational checks can double/triple finding count and exceed "
+            "the static analysis agent's 16K token ceiling. Change to False only when "
+            "the SA task token budget is also raised to accommodate the extra volume."
+        ),
+    )
     contract_names: list[str] = Field(
         default_factory=list,
         description="Project contract names to keep findings for (empty = keep all). "
@@ -162,6 +221,7 @@ class SlitherTool(BaseTool):
              contract_names: list[str] | None = None, original_file_dir: str = "") -> str:
         target_path = Path(target).resolve()
         flat_file: Path | None = None
+        solc_path: str | None = None
 
         try:
             # -- Determine slither target and source for pragma detection --
@@ -200,7 +260,7 @@ class SlitherTool(BaseTool):
                     version = _detect_solc_version(source_text)
                     if version:
                         print(f"  [slither] detected solc {version}, selecting via solc-select...")
-                        _setup_solc(version)
+                        solc_path = _setup_solc(version)
                 except OSError:
                     pass
 
@@ -209,9 +269,11 @@ class SlitherTool(BaseTool):
             os.close(fd)
             os.unlink(json_path)  # Slither refuses to overwrite existing files
             try:
-                cmd = ["slither", slither_target, "--json", json_path]
+                cmd = [_venv_bin("slither"), slither_target, "--json", json_path]
                 if exclude_informational:
                     cmd += ["--exclude-informational"]
+                if solc_path:
+                    cmd += ["--solc", solc_path]
 
                 print(f"  [slither] running: {' '.join(cmd)}")
                 try:
@@ -502,3 +564,41 @@ class EtherscanTool(BaseTool):
             # Source code intentionally excluded — can be very large;
             # agent may request it separately if needed
         }, indent=2)
+
+
+# ------------------------------------------------------------------
+# VectorReadTool — loads a security vector procedure file by ID
+# ------------------------------------------------------------------
+
+_VECTORS_DIR = Path(__file__).parent / "knowledge" / "vectors"
+
+
+class _VectorReadInput(BaseModel):
+    vector_id: str = Field(
+        description='The vector ID to load, e.g. "V07" or "V14". '
+                    "Must be one of V01–V19."
+    )
+
+
+class VectorReadTool(BaseTool):
+    name: str = "VectorReadTool"
+    description: str = (
+        "Reads the procedure file for a specific security audit vector. "
+        'Input: vector_id as a string like "V07" or "V14". '
+        "Returns the full procedure text for that vector. "
+        "Always call this before analysing the contract for that vector."
+    )
+    args_schema: Type[BaseModel] = _VectorReadInput
+
+    def _run(self, vector_id: str) -> str:
+        # Accept both "V07" and "07" for convenience
+        vid = vector_id.strip().upper()
+        if not vid.startswith("V"):
+            vid = "V" + vid
+        path = _VECTORS_DIR / f"{vid}.md"
+        if not path.exists():
+            return (
+                f"Error: Vector file {vid}.md not found in knowledge/vectors/. "
+                f"Valid IDs are V01–V19."
+            )
+        return path.read_text(encoding="utf-8")
